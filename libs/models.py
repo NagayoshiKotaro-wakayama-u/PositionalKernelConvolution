@@ -567,30 +567,31 @@ class PConvLearnSite(PConvUnetModel):
         
         return outputs
 
+    def encode_mask(self, mask):
+        e_conv1, e_mask1 = self.encoder1(mask, mask, istraining=False)
+        e_conv2, e_mask2 = self.encoder2(e_conv1, e_mask1, istraining=False)
+        e_conv3, e_mask3 = self.encoder3(e_conv2, e_mask2, istraining=False)
+        e_conv4, e_mask4 = self.encoder4(e_conv3, e_mask3, istraining=False)
+        e_conv5, e_mask5 = self.encoder5(e_conv4, e_mask4, istraining=False)
+        return [e_mask1,e_mask2,e_mask3,e_mask4,e_mask5]
+
     def L1_site(self, mask):
 
-        pdb.set_trace()
+        # pdb.set_trace()
         if self.onlyInputSite:
             siteDelta = self.siteFeature - self.initValue
         else:
             siteDeltas = [self.siteFeatures[i] - self.initValues[i] for i,_ in enumerate(self.siteLayers)]
             # エンコーダ各階層のマスク画像のリスト
+            # pdb.set_trace()
+            emasks = self.encode_mask(mask)
             masks = []
-            for i,lind in enumerate(self.siteLayers):
-                # 欠損部をMAXプーリングによって減らしたマスク画像
-                # ex) lind = 3 => 2回プーリングされたマスク画像がリストに入る
-                cur_mask = mask[0,:,:,0]
-                for _ in range(lind-1):
-                    cur_mask = pool2d(
-                                    cur_mask,
-                                    self.encksize[i],
-                                    2,
-                                    padding=(self.encksize[i]-1)//2
-                                )
-                masks.append(
-                    cur_mask[np.newaxis,:,:,np.newaxis]
-                )
 
+            for i,lind in enumerate(self.siteLayers):
+                if lind==1:
+                    masks.append(mask)
+                else:
+                    masks.append(emasks[lind-2][:,:,:,:1])
         
         def loss_L1site(y_true, y_pred):
 
@@ -601,6 +602,7 @@ class PConvLearnSite(PConvUnetModel):
                     res = K.mean(siteDelta)
             
             else:
+
                 res = 0
                 for i,_ in enumerate(self.siteLayers):
                     if self.obsOnlyL1:

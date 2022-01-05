@@ -15,6 +15,7 @@ class PConv2D(tf.keras.layers.Conv2D):
         self.input_spec = [InputSpec(min_ndim=4),InputSpec(min_ndim=4)]
 
     def build(self,input_shape):
+        # pdb.set_trace()
         # 入力のShape
         input_shape = tensor_shape.TensorShape(input_shape[0])
         input_channel = self._get_input_channel(input_shape)
@@ -98,7 +99,6 @@ class PConv2D(tf.keras.layers.Conv2D):
 
         return (outputs_img, outputs_mask)
 
-
 # encoder
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, filters, kernel_size, encoderNumber, strides=(2,2), bn=True, use_bias=False):
@@ -116,11 +116,16 @@ class Encoder(tf.keras.layers.Layer):
         self.use_bias = use_bias
 
     def call(self, img_in, mask_in, istraining=True):
+        # pdb.set_trace()
         conv,mask = self.pconv((img_in,mask_in))
         if self.bn:
             conv = self.batchnorm(conv,training=istraining)
         conv = self.relu(conv)
         return (conv, mask)
+
+    # def encode_mask(self, mask_in):
+    #     _, encoded_mask = self.pconv.call((mask_in,mask_in),maskOnly=True)
+    #     return encoded_mask
 
 
 # decoder
