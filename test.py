@@ -12,11 +12,16 @@ import matplotlib.pyplot as plt
 import cv2
 from PIL import Image
 from libs.modelConfig import parse_args,modelBuild
-
+from libs.models import PConvLearnSite
 
 if __name__ == "__main__":
     args = parse_args(isTrain=False)
     tf.config.run_functions_eagerly(True)
+
+    # フェーズ
+    ph = ""
+    if args.phase > 1:
+        ph = f"{args.phase}"
 
     site_path = f"data{os.sep}siteImage{os.sep}"
     experiment_path = ".{0}experiment{0}{1}_logs".format(os.sep,args.experiment)
@@ -82,20 +87,25 @@ if __name__ == "__main__":
             model = modelBuild("learnSitePConv",args)
         elif args.learnSitePKConv:
             model = modelBuild("learnSitePKConv",args)
+        elif args.branchLearnSitePConv:
+            model = modelBuild("branch_lSitePConv",args)
         else:
             model = modelBuild("pconv",args,isTrain=False)
         dataset = (testMasked, testMask, testImg)
     
     model.compile(args.lr, testMask[0:1])
-    checkpoint_path = f"{experiment_path}{os.sep}logs{os.sep}cp.ckpt"
+    checkpoint_path = f"{experiment_path}{os.sep}logs{ph}{os.sep}cp.ckpt"
     model.load_weights(checkpoint_path)
 
     # 学習した位置特性で値を持つ点付近の誤差
     #==============================================
     mask = testMask[0,:,:,0]
 
-    if args.learnSitePConv or args.learnSitePKConv:
+    # pdb.set_trace()
+    if isinstance(model,PConvLearnSite):
         model.plotSiteFeature(epoch="-test",plotSitePath=siteConv_path)
+        # pdb.set_trace()
+        # sys.exit()
     if False:
         # TODO:後で消す
         # テスト用(上位10％だけプロットする)

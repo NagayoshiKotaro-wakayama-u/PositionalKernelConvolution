@@ -8,16 +8,28 @@ import copy
 from libs.util import loadSiteImage,plotDatas
 from argparse import ArgumentParser
 from libs.modelConfig import parse_args,modelBuild
+from tensorflow.compat.v1 import ConfigProto
+from tensorflow.compat.v1 import InteractiveSession
+
 
 if __name__ == "__main__":
     args = parse_args(isTrain=True)
     tf.config.run_functions_eagerly(True)
 
+    config = ConfigProto()
+    config.gpu_options.allow_growth = True
+    session = InteractiveSession(config=config)
+
+    # フェーズ
+    ph = ""
+    if args.phase > 1:
+        ph = f"{args.phase}"
+
     # 実験に用いるディレクトリを作成
     experiment_path = ".{0}experiment{0}{1}_logs".format(os.sep,args.experiment)
-    loss_path = f"{experiment_path}{os.sep}losses"
-    log_path = f"{experiment_path}{os.sep}logs"
-    test_path = f"{experiment_path}{os.sep}test_samples"
+    loss_path = f"{experiment_path}{os.sep}losses{ph}"
+    log_path = f"{experiment_path}{os.sep}logs{ph}"
+    test_path = f"{experiment_path}{os.sep}test_samples{ph}"
     site_path = f"data{os.sep}siteImage{os.sep}"
 
     for DIR in [experiment_path,loss_path,log_path,test_path]:
@@ -28,7 +40,6 @@ if __name__ == "__main__":
     dataset = args.dataset # データセットのディレクトリ
     dspath = ".{0}data{0}{1}{0}".format(os.sep,dataset)
     existPointPath = f"data{os.sep}sea.png" if "quake" in dataset else ""
-    
 
     # 各pickleデータのパス
     TRAIN_PICKLE = dspath+"train.pickle"
@@ -104,12 +115,22 @@ if __name__ == "__main__":
             testMask[0:1]
         )
 
+    elif args.cPConv: # 震源別・ラベル情報別に位置特性を学習し使い分ける
+        trainLab = pickle.load(open(TRAIN_PICKLE,"rb"))["labels"]
+        #TODO:ラベル情報をOnehotベクトルに変換
+        trainData = (trainMasked, trainMask, trainImg)
+        model = modelBuild("conditionalPConv",args)
+
     else:
         # 学習可能な位置特性を持つPConvUNet
         if args.learnSitePConv:
             model = modelBuild("learnSitePConv",args)
         elif args.learnSitePKConv:
             model = modelBuild("learnSitePKConv",args)
+        elif args.branchLearnSitePConv:
+            model = modelBuild("branch_lSitePConv",args)
+        elif args.sharePConv_lSite:
+            model = modelBuild("sharePConv_lSite",args)
         else:# 既存法(PConvUNet)
             # モデルのビルド
             model = modelBuild("pconv",args)
@@ -128,26 +149,17 @@ if __name__ == "__main__":
     checkpoint_path = f"{experiment_path}{os.sep}logs{os.sep}cp.ckpt"
     checkpoint_dir = os.path.dirname(checkpoint_path)
 
-    # コールバック関数の設定
-    ## EarlyStoppingを導入
-    callbacks = [
-        tf.keras.callbacks.ModelCheckpoint(
-            checkpoint_path, save_weights_only=True, verbose=1
-        ),
-        tf.keras.callbacks.EarlyStopping(
-            monitor='val_PSNR', min_delta=0.1, patience=args.patience,
-            verbose=1, mode='max', baseline=None, restore_best_weights=True
-        )
-    ]
 
     # 学習中にテストを行いプロットするクラス
     class testSample(tf.keras.callbacks.Callback):
-        def __init__(self, test_sample, gt_sample):
+        def __init__(self, test_sample, gt_sample, testpath="",):
             super(testSample, self).__init__()
             self.sample = test_sample
+            self.siteFs = []
+            self.testpath = testpath
             plt.imshow(gt_sample[0,:,:,0])
             plt.colorbar()
-            plt.savefig(f"{test_path}{os.sep}test_gt_sample.png")
+            plt.savefig(f"{testpath}{os.sep}test_gt_sample.png")
 
         def on_epoch_end(self, epoch, logs=None):
             pred_img = model.predict_step(self.sample)
@@ -155,24 +167,47 @@ if __name__ == "__main__":
             plt.close()
             plt.imshow(pred_img[0,:,:,0])
             plt.colorbar()
-            plt.savefig(f"{test_path}{os.sep}pred_{epoch}.png")
+            plt.savefig(f"{self.testpath}{os.sep}pred_{epoch}.png")
 
             if args.learnSitePConv:
-                model.plotSiteFeature(epoch,f"{test_path}")
+                model.plotSiteFeature(epoch,f"{self.testpath}")
+            elif args.branchLearnSitePConv:
+                model.plotSiteFeature(epoch,f"{self.testpath}",plotfmap=True)
+                self.siteFs.append(model.getSiteFeature())
+        
+        def on_train_end(self,logs=None):
+            pickle.dump(self.siteFs,open(f"{testpath}{os.sep}training_siteFeatures.png","wb"))
+            return
 
-    # コールバック関数に追加
-    callbacks.append(
-        testSample(test_sample, testImg[0:1])
-    )
+
+    # コールバック関数の設定
+    ## EarlyStoppingを導入
+    callbacks = [
+        tf.keras.callbacks.ModelCheckpoint(
+            checkpoint_path, save_weights_only=True, verbose=1
+        ),
+        tf.keras.callbacks.EarlyStopping(
+            monitor='val_PSNR', min_delta=0.1, patience=args.patience, 
+            verbose=1, mode='max', baseline=None, restore_best_weights=True
+        ),
+        testSample(test_sample, testImg[0:1], testpath=test_path)
+    ]
+
     
+    model.changeTrainPhase(args.phase) # フェーズ切り替え
+    if args.phase > 1:
+        # フェーズ0や1の情報を参照
+        checkpoint_path = f"{experiment_path}{os.sep}logs{os.sep}cp.ckpt"
+        model.load_weights(checkpoint_path)
+
     # =======================
     # 学習
     history = model.fit(
         trainData,
-        batch_size=5,
+        batch_size=batchsize,
         validation_data=validData,
         epochs=args.epochs,
-        validation_split=0.1, 
+        validation_split=0.1,
         callbacks=callbacks)
 
     # =======================
@@ -181,8 +216,8 @@ if __name__ == "__main__":
     pickle.dump(history, open(f"{loss_path}{os.sep}trainingHistory.pickle","wb"))
 
     metrics = ['loss','PSNR','loss_hole','loss_valid','loss_tv']
-    if args.learnSitePConv:
-        metrics.append('loss_L1site')
+    # if args.learnSitePConv or args.branchLearnSitePConv:
+    #     metrics.append('loss_L1site')
     traLoss = [history[met] for met in metrics]
     valLoss = [history['val_'+met] for met in metrics]
 
@@ -196,3 +231,4 @@ if __name__ == "__main__":
             style=['bo-','r'])
 
     # =======================
+

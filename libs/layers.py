@@ -1,6 +1,6 @@
 import tensorflow as tf
 import tensorflow.keras.backend as K
-from tensorflow.keras.layers import InputSpec, Concatenate, BatchNormalization, Activation, LeakyReLU, UpSampling2D
+from tensorflow.keras.layers import InputSpec, Concatenate, BatchNormalization, Activation, LeakyReLU, UpSampling2D, MaxPool2D
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops import nn, nn_ops, array_ops
 import six
@@ -28,7 +28,7 @@ class PConv2D(tf.keras.layers.Conv2D):
             initializer=self.kernel_initializer,
             regularizer=self.kernel_regularizer,
             constraint=self.kernel_constraint,
-            trainable=True,
+            trainable=self.trainable,
             dtype=self.dtype)
 
         self.kernel_mask = tf.keras.backend.ones(kernel_shape)
@@ -40,7 +40,7 @@ class PConv2D(tf.keras.layers.Conv2D):
                 initializer=self.bias_initializer,
                 regularizer=self.bias_regularizer,
                 constraint=self.bias_constraint,
-                trainable=True,
+                trainable=self.trainable,
                 dtype=self.dtype)
         else:
             self.bias = None
@@ -49,14 +49,14 @@ class PConv2D(tf.keras.layers.Conv2D):
         if self.padding == 'causal':
             tf_padding = 'VALID'  # Causal padding handled in `call`.
         elif isinstance(self.padding, six.string_types):
-            tf_padding = self.padding.upper()
+            tf_padding = self.padding.upper() # SAME
         else:
             tf_padding = self.padding
 
-        tf_dilations = list(self.dilation_rate)
-        tf_strides = list(self.strides)
+        tf_dilations = list(self.dilation_rate) # [1,1]
+        tf_strides = list(self.strides) # [2,2]
 
-        tf_op_name = self.__class__.__name__
+        tf_op_name = self.__class__.__name__ # PConv2D
 
         self._convolution_op = functools.partial(
             nn_ops.convolution_v2,
@@ -114,6 +114,11 @@ class Encoder(tf.keras.layers.Layer):
         self.batchnorm = BatchNormalization(name=f'EncBN_{self.encoderNumber}')
         self.relu = Activation('relu')
         self.use_bias = use_bias
+        self.strides = strides
+
+        if strides == (1,1):
+            # pdb.set_trace()
+            self.pooling = MaxPool2D(pool_size=(2, 2), strides=(2, 2), padding='valid')
 
     def call(self, img_in, mask_in, istraining=True):
         # pdb.set_trace()
@@ -121,11 +126,15 @@ class Encoder(tf.keras.layers.Layer):
         if self.bn:
             conv = self.batchnorm(conv,training=istraining)
         conv = self.relu(conv)
+
+        if self.strides==(1,1):
+            conv = self.pooling(conv)
+            mask = self.pooling(mask)
+        
         return (conv, mask)
 
-    # def encode_mask(self, mask_in):
-    #     _, encoded_mask = self.pconv.call((mask_in,mask_in),maskOnly=True)
-    #     return encoded_mask
+    def switchTrainable(self,setBool=False):
+        self.trainable = setBool
 
 
 # decoder
@@ -156,6 +165,11 @@ class Decoder(tf.keras.layers.Layer):
         conv = self.leakyrelu(conv)
         return conv, mask
 
+    def switchTrainable(self,setBool=False):
+        self.trainable = setBool
+        pdb.set_trace()
+
+
 #=================================================================
 # pkconv
 class PKConv(tf.keras.layers.Conv2D):
@@ -167,10 +181,9 @@ class PKConv(tf.keras.layers.Conv2D):
         self.siteInputChan= siteInputChan
         self.opeType = opeType
         self.sConvKernelLearn = sConvKernelLearn
-        
         self.multiSiteW_Learn = learnMultiSiteW
 
-    def build(self, input_shape):        
+    def build(self, input_shape):
         input_shape = tensor_shape.TensorShape(input_shape[0])
         input_channel = self._get_input_channel(input_shape)
         kernel_shape = self.kernel_size + (input_channel // self.groups, self.filters)
@@ -238,7 +251,6 @@ class PKConv(tf.keras.layers.Conv2D):
         _img, _mask, _site = inputs
         if _site.shape[0] == 1:
             _site = K.tile(_site,[_img.shape[0],1,1,1])
-        # pdb.set_trace()
 
         if self.opeType == "add": # 位置特性を足し算(W+P)X
             # Apply convolutions to image (W*X)
@@ -356,10 +368,12 @@ class PKEncoder(tf.keras.layers.Layer):
 # siteconv
 class siteConv(tf.keras.layers.Conv2D):
     def __init__(self, *args, **kwargs):
+        # pdb.set_trace()
         super(siteConv, self).__init__(*args, **kwargs)
         self.input_spec = [InputSpec(min_ndim=4)]
 
     def build(self, input_shape):
+        # pdb.set_trace()
         input_shape = tensor_shape.TensorShape(input_shape)
         input_channel = self._get_input_channel(input_shape)
         kernel_shape = self.kernel_size + (input_channel, self.filters)
@@ -369,7 +383,7 @@ class siteConv(tf.keras.layers.Conv2D):
             initializer=self.kernel_initializer,
             regularizer=self.kernel_regularizer,
             constraint=self.kernel_constraint,
-            trainable=True,
+            trainable=self.trainable,
             dtype=self.dtype)
         
         # Convert Keras formats to TF native formats.
@@ -400,6 +414,7 @@ class siteConv(tf.keras.layers.Conv2D):
         if self.activation is not None:
             outputs_img = self.activation(outputs_img)
         return outputs_img
+
 
 class siteDeconv(siteConv):
     def __init__(self, *args, **kwargs):
