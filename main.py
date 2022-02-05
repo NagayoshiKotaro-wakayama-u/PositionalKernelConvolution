@@ -42,8 +42,8 @@ if __name__ == "__main__":
     existPointPath = f"data{os.sep}sea.png" if "quake" in dataset else ""
 
     # 各pickleデータのパス
-    TRAIN_PICKLE = dspath+"train.pickle"
-    TRAIN_MASK_PICKLE = dspath+"train_mask.pickle"
+    TRAIN_PICKLE = dspath+"train.pickle" # 辞書Object(key:"images","labels")
+    TRAIN_MASK_PICKLE = dspath+"train_mask.pickle" # np.array()
     VALID_PICKLE = dspath+"valid.pickle"
     VALID_MASK_PICKLE = dspath+"valid_mask.pickle"
     TEST_PICKLE = dspath+"test.pickle"
@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
     # バッチサイズはメモリサイズに合わせて調整が必要
     batchsize = 5 # バッチサイズ
-    steps_per_epoch = train_Num//batchsize # 1エポック内のiteration数
+    # steps_per_epoch = train_Num//batchsize # 1エポック内のiteration数
 
     # データのロード
     trainImg = pickle.load(open(TRAIN_PICKLE,"rb"))["images"]
@@ -71,6 +71,8 @@ if __name__ == "__main__":
     testImg = pickle.load(open(TEST_PICKLE,"rb"))["images"]
     testMask = pickle.load(open(TEST_MASK_PICKLE,"rb"))
     testMasked = testImg*testMask
+
+    # pdb.set_trace()
     #---------------------------------------------------------------
     # Build the model
     if args.PKConv:# カーネルに対して位置特性を導入
@@ -127,7 +129,7 @@ if __name__ == "__main__":
             model = modelBuild("learnSitePConv",args)
         elif args.learnSitePKConv:
             model = modelBuild("learnSitePKConv",args)
-        elif args.branchLearnSitePConv:
+        elif args.branchLearnSitePConv:# 最新手法
             model = modelBuild("branch_lSitePConv",args)
         elif args.sharePConv_lSite:
             model = modelBuild("sharePConv_lSite",args)
@@ -146,7 +148,7 @@ if __name__ == "__main__":
     mask = mask.astype('float32') if mask.dtype != np.float32 else mask
     model.compile(args.lr, mask)
 
-    checkpoint_path = f"{experiment_path}{os.sep}logs{os.sep}cp.ckpt"
+    checkpoint_path = f"{log_path}{os.sep}cp.ckpt"
     checkpoint_dir = os.path.dirname(checkpoint_path)
 
 
@@ -155,7 +157,7 @@ if __name__ == "__main__":
         def __init__(self, test_sample, gt_sample, testpath="",):
             super(testSample, self).__init__()
             self.sample = test_sample
-            self.siteFs = []
+            # self.siteFs = []
             self.testpath = testpath
             plt.imshow(gt_sample[0,:,:,0])
             plt.colorbar()
@@ -173,12 +175,8 @@ if __name__ == "__main__":
                 model.plotSiteFeature(epoch,f"{self.testpath}")
             elif args.branchLearnSitePConv:
                 model.plotSiteFeature(epoch,f"{self.testpath}",plotfmap=True)
-                self.siteFs.append(model.getSiteFeature())
         
-        def on_train_end(self,logs=None):
-            pickle.dump(self.siteFs,open(f"{testpath}{os.sep}training_siteFeatures.png","wb"))
-            return
-
+        
 
     # コールバック関数の設定
     ## EarlyStoppingを導入
@@ -194,14 +192,24 @@ if __name__ == "__main__":
     ]
 
     
-    model.changeTrainPhase(args.phase) # フェーズ切り替え
-    if args.phase > 1:
-        # フェーズ0や1の情報を参照
-        checkpoint_path = f"{experiment_path}{os.sep}logs{os.sep}cp.ckpt"
-        model.load_weights(checkpoint_path)
+    
+    if args.branchLearnSitePConv:# 最新手法
+        model.changeTrainPhase(args.phase) # フェーズ切り替え
+    
+        # 1つ前のフェーズ
+        current_ph = ""
+        if args.phase - 1 > 1: # 2以降は番号を付ける
+            current_ph = f"{args.phase - 1}"
+
+        if args.pretrainModel != "":
+            # 1つ前のフェーズのパラメータをロード
+            expath = f".{os.sep}experiment{os.sep}{args.pretrainModel}_logs"
+            load_checkpoint_path = f"{expath}{os.sep}logs{current_ph}{os.sep}cp.ckpt"
+            model.load_weights(load_checkpoint_path)
 
     # =======================
     # 学習
+    # pdb.set_trace()
     history = model.fit(
         trainData,
         batch_size=batchsize,
