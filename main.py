@@ -127,6 +127,8 @@ if __name__ == "__main__":
         # 学習可能な位置特性を持つPConvUNet
         if args.learnSitePConv:
             model = modelBuild("learnSitePConv",args)
+        elif args.branchLearnSitePKConv: # branch and PKConv
+            model = modelBuild("branch_lSitePKConv",args)
         elif args.learnSitePKConv:
             model = modelBuild("learnSitePKConv",args)
         elif args.branchLearnSitePConv:# 最新手法
@@ -136,7 +138,7 @@ if __name__ == "__main__":
         else:# 既存法(PConvUNet)
             # モデルのビルド
             model = modelBuild("pconv",args)
-        
+
         # データセット
         trainData = (trainMasked, trainMask, trainImg)
         validData = ((validMasked, validMask), validImg)
@@ -176,7 +178,63 @@ if __name__ == "__main__":
             elif args.branchLearnSitePConv:
                 model.plotSiteFeature(epoch,f"{self.testpath}",plotfmap=True)
         
+    class phaseSwitchCycle(tf.keras.callbacks.Callback):
+        def __init__(self) -> None:
+            super().__init__()
+            # エポック数
+            self.totalEpoch = 0
+            self.countEpoch = 0
+
+            # phase は　1 と 2を繰り返す
+            self.pind = 0
+            if args.branchLearnSitePKConv or args.branchLearnSitePConv:
+                self.phases = [1,4,5]
+            else:
+                self.phases = [1,2]
+            self.phaseNum = len(self.phases)
+            self.cycleNums = [1 for _ in range(self.phaseNum)] # 学習のサイクルは１Epochずつ
         
+        def on_epoch_end(self, epoch, logs=None):
+            if self.totalEpoch == 0:
+                # 初めは両方更新しないとパラメータが更新されない？
+                model.changeTrainPhase(0)
+            else:
+                self.countEpoch += 1
+                cycleNum = self.cycleNums[self.pind]
+                
+                if self.countEpoch == cycleNum:
+                    self.countEpoch = 0
+                    # 次のフェーズへ
+                    self.pind = (self.pind+1)%self.phaseNum
+                    phase = self.phases[self.pind]
+                    model.changeTrainPhase(phase)
+
+            self.totalEpoch += 1
+            
+    class earlySiteFeatureStop(tf.keras.callbacks.Callback):
+        def __init__(self) -> None:
+            super().__init__()
+            # エポック数
+            self.phase2Counter = 0
+            self.phase = 1
+            self.maxSiteLearningEpoch = 5
+
+        def on_epoch_end(self, epoch, logs=None):
+            # 位置特性の学習をした回数をカウント
+            if self.phase == 2:
+                self.phase2Counter += 1
+
+            if self.phase2Counter > self.maxSiteLearningEpoch:
+                # 一定数位置特性の学習をしたらもうU-Netだけしか学習しない
+                self.phase = 1
+                model.changeTrainPhase(1)
+                # pdb.set_trace()
+            else:
+                # フェーズ切り替え(1と2)
+                self.phase = (self.phase % 2) + 1 # 0か1にして＋１
+                model.changeTrainPhase(self.phase)
+            
+
 
     # コールバック関数の設定
     ## EarlyStoppingを導入
@@ -191,21 +249,27 @@ if __name__ == "__main__":
         testSample(test_sample, testImg[0:1], testpath=test_path)
     ]
 
-    
-    
-    if args.branchLearnSitePConv:# 最新手法
-        model.changeTrainPhase(args.phase) # フェーズ切り替え
-    
-        # 1つ前のフェーズ
-        current_ph = ""
-        if args.phase - 1 > 1: # 2以降は番号を付ける
-            current_ph = f"{args.phase - 1}"
+    # 
+    if args.switchingTrainPhase:
+        callbacks.append(phaseSwitchCycle())
+        model.changeTrainPhase(0)
+    elif args.earlySiteFeatureStop: # 最新手法
+        callbacks.append(earlySiteFeatureStop())
+        model.changeTrainPhase(0) # 初めは両方のモデルを同時に学習（phase = 0に設定）
 
-        if args.pretrainModel != "":
-            # 1つ前のフェーズのパラメータをロード
-            expath = f".{os.sep}experiment{os.sep}{args.pretrainModel}_logs"
-            load_checkpoint_path = f"{expath}{os.sep}logs{current_ph}{os.sep}cp.ckpt"
-            model.load_weights(load_checkpoint_path)
+    
+    # if args.branchLearnSitePConv:
+    #     model.changeTrainPhase(args.phase) # フェーズ切り替え
+    #     # 1つ前のフェーズ
+    #     current_ph = ""
+    #     if args.phase - 1 > 1: # 2以降は番号を付ける
+    #         current_ph = f"{args.phase - 1}"
+
+    #     if args.pretrainModel != "":
+    #         # 1つ前のフェーズのパラメータをロード
+    #         expath = f".{os.sep}experiment{os.sep}{args.pretrainModel}_logs"
+    #         load_checkpoint_path = f"{expath}{os.sep}logs{current_ph}{os.sep}cp.ckpt"
+    #         model.load_weights(load_checkpoint_path)
 
     # =======================
     # 学習

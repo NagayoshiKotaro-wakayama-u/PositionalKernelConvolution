@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import cv2
 from PIL import Image
 from libs.modelConfig import parse_args,modelBuild
-from libs.models import PConvLearnSite
+from libs.models import PConvLearnSite,branchPKConv_lSite,branchPConv_lSite,PKConvLearnSite
 
 if __name__ == "__main__":
     args = parse_args(isTrain=False)
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     
         
     # 出力先のディレクトリを作成
-    result_path = f"{experiment_path}{os.sep}result"
+    result_path = f"{experiment_path}{os.sep}result{ph}"
     test_path = f"{result_path}{os.sep}test"
     comp_path = f"{result_path}{os.sep}comparison"
     siteConv_path = f"{result_path}{os.sep}site"
@@ -84,28 +84,41 @@ if __name__ == "__main__":
 
     else:
         if args.learnSitePConv:
-            model = modelBuild("learnSitePConv",args)
+            model = modelBuild("learnSitePConv",args,isTrain=False)
         elif args.learnSitePKConv:
-            model = modelBuild("learnSitePKConv",args)
+            model = modelBuild("learnSitePKConv",args,isTrain=False)
         elif args.branchLearnSitePConv:
-            model = modelBuild("branch_lSitePConv",args)
+            model = modelBuild("branch_lSitePConv",args,isTrain=False)
+        elif args.branchLearnSitePKConv: # branch and PKConv
+            model = modelBuild("branch_lSitePKConv",args,isTrain=False)
         else:
             model = modelBuild("pconv",args,isTrain=False)
         dataset = (testMasked, testMask, testImg)
     
+    # pdb.set_trace()
     model.compile(args.lr, testMask[0:1])
-    checkpoint_path = f"{experiment_path}{os.sep}logs{ph}{os.sep}cp.ckpt"
-    model.load_weights(checkpoint_path)
+    if args.phase == 1:
+        # フェーズ1のパラメータをロード
+        expath = f".{os.sep}experiment{os.sep}{args.pretrainModel}_logs"
+        load_checkpoint_path = f"{expath}{os.sep}logs{os.sep}cp.ckpt"
+        model.load_weights(load_checkpoint_path)
+    else:
+        checkpoint_path = f"{experiment_path}{os.sep}logs{ph}{os.sep}cp.ckpt"
+        model.load_weights(checkpoint_path)
+    
+    if args.branchLearnSitePConv:
+        model.changeTrainPhase(args.phase) # フェーズ切り替え
 
     # 学習した位置特性で値を持つ点付近の誤差
     #==============================================
     mask = testMask[0,:,:,0]
 
     # pdb.set_trace()
-    if isinstance(model,PConvLearnSite):
+    if isinstance(model,PConvLearnSite) or isinstance(model,PKConvLearnSite) or isinstance(model,branchPKConv_lSite) and args.phase != 1:
         model.plotSiteFeature(epoch="-test",plotSitePath=siteConv_path)
-        # pdb.set_trace()
-        # sys.exit()
+        pickle.dump(model.getSiteFeature(), open(f"{siteConv_path}{os.sep}siteFeature.pickle","wb"))
+        if args.siteonly:
+            sys.exit()
     if False:
         # TODO:後で消す
         # テスト用(上位10％だけプロットする)
@@ -143,8 +156,6 @@ if __name__ == "__main__":
     _,dilated_site01 = cv2.threshold(dilated_site01,1e-10,1,cv2.THRESH_BINARY)# 二値化
     dilated_site01 = dilated_site01 * exist - site01 # 海洋部・観測点は除く  
     #==============================================
-
-
     preds, errs, MAEs, MSEs, PSNRs, obsAroundPSNRs = [], [], [], [], [], []
     ite = 0
     cm_bwr = plt.get_cmap("bwr") # カラーマップ

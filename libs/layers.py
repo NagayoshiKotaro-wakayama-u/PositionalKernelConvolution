@@ -3,6 +3,7 @@ import tensorflow.keras.backend as K
 from tensorflow.keras.layers import InputSpec, Concatenate, BatchNormalization, Activation, LeakyReLU, UpSampling2D, MaxPool2D
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops import nn, nn_ops, array_ops
+from tensorflow.keras.constraints import NonNeg
 import six
 import functools
 import pdb
@@ -136,7 +137,6 @@ class Encoder(tf.keras.layers.Layer):
     def switchTrainable(self,setBool=False):
         self.trainable = setBool
 
-
 # decoder
 class Decoder(tf.keras.layers.Layer):
     def __init__(self, filters, kernel_size, bn=True, use_bias=False):
@@ -168,7 +168,6 @@ class Decoder(tf.keras.layers.Layer):
     def switchTrainable(self,setBool=False):
         self.trainable = setBool
         pdb.set_trace()
-
 
 #=================================================================
 # pkconv
@@ -210,7 +209,8 @@ class PKConv(tf.keras.layers.Conv2D):
 
         # 特徴マップのチャネル数//位置特性のチャネル数
         #（位置特性のチャネル数を特徴マップと合わせるために使用）
-        self.tileNum = input_shape[3]
+        # self.tileNum = input_shape[3]
+        self.tileNum = 1
 
         if self.siteInputChan > 1 and self.multiSiteW_Learn:
             self.multiSiteW = self.add_weight(
@@ -256,29 +256,34 @@ class PKConv(tf.keras.layers.Conv2D):
             # Apply convolutions to image (W*X)
             wx = self._convolution_op(_img*_mask, self.kernel)
 
-            # 特徴マップのチャネル数より位置特性の枚数が少ない場合
+            # 特徴マップのチャネル数より位置特性の枚数が少ない場合 ← 考慮しないことに(2022/02/07)
             # 末尾に次元を追加してタイル（位置特性ごとに塊ができるようにタイルするため）
-            posEmb = K.tile(tf.expand_dims(_site[:1],-1),[1,1,1,1,self.tileNum])
-            posEmb = tf.reshape(posEmb,shape=[1]+_img.shape[1:3]+[self.tileNum*self.siteInputChan])
-            tiled_images = K.tile(_img,[1,1,1,self.siteInputChan])
+            # posEmb = K.tile(tf.expand_dims(_site[:1],-1),[1,1,1,1,self.tileNum])
+            # posEmb = tf.reshape(posEmb,shape=[1]+_img.shape[1:3]+[self.tileNum*self.siteInputChan])
+            # tiled_images = K.tile(_img,[1,1,1,self.siteInputChan])
+            
+            posEmb = _site
 
-            # PX = P(位置特性)  ×  X(特徴マップ)
-            pxs = posEmb*tiled_images
+            ## PXにもマスクをかける ← 2022/02/28
+            # PX = P(位置特性)  ×  X(特徴マップ) x mask
+            pxs = posEmb*_img*_mask
 
             # 複数チャネル＆加重和のための重み
             if self.siteInputChan > 1 and self.multiSiteW_Learn:
                 multiSiteW_softed = K.softmax(self.multiSiteW)
 
             # 各チャネルの統合
-            px = 0
-            for c_ind in range(self.siteInputChan):
-                pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
-                pxi = self._convolution_op(pxi, self.onesKernel)
-                # px = pxi + px # TODO:いずれはAttenntionなどによる重みつき和を計算したい
-                if self.siteInputChan > 1 and self.multiSiteW_Learn:# 重み和の計算で重みを学習するかどうか
-                    px += multiSiteW_softed[c_ind] * pxi
-                else: # 平均を取る
-                    px += pxi / self.siteInputChan
+            # pdb.set_trace()
+            px = self._convolution_op(pxs,self.onesKernel)
+            # px = 0
+            # for c_ind in range(self.siteInputChan):
+            #     pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
+            #     pxi = self._convolution_op(pxi, self.onesKernel)
+            #     # px = pxi + px # TODO:いずれはAttenntionなどによる重みつき和を計算したい
+            #     if self.siteInputChan > 1 and self.multiSiteW_Learn:# 重み和の計算で重みを学習するかどうか
+            #         px += multiSiteW_softed[c_ind] * pxi
+            #     else: # 平均を取る
+            #         px += pxi / self.siteInputChan
 
             outputs_img = wx + px
 
@@ -371,42 +376,44 @@ class siteConv(tf.keras.layers.Conv2D):
         # pdb.set_trace()
         super(siteConv, self).__init__(*args, **kwargs)
         self.input_spec = [InputSpec(min_ndim=4)]
+        # if nonNegative:
+        #     self.kernel_constraint = NonNeg()
 
-    def build(self, input_shape):
-        # pdb.set_trace()
-        input_shape = tensor_shape.TensorShape(input_shape)
-        input_channel = self._get_input_channel(input_shape)
-        kernel_shape = self.kernel_size + (input_channel, self.filters)
-        self.kernel = self.add_weight(
-            name='kernel',
-            shape=kernel_shape,
-            initializer=self.kernel_initializer,
-            regularizer=self.kernel_regularizer,
-            constraint=self.kernel_constraint,
-            trainable=self.trainable,
-            dtype=self.dtype)
+    # def build(self, input_shape):
+    #     # pdb.set_trace()
+    #     input_shape = tensor_shape.TensorShape(input_shape)
+    #     input_channel = self._get_input_channel(input_shape)
+    #     kernel_shape = self.kernel_size + (input_channel, self.filters)
+    #     self.kernel = self.add_weight(
+    #         name='kernel',
+    #         shape=kernel_shape,
+    #         initializer=self.kernel_initializer,
+    #         regularizer=self.kernel_regularizer,
+    #         constraint=self.kernel_constraint,
+    #         trainable=self.trainable,
+    #         dtype=self.dtype)
         
-        # Convert Keras formats to TF native formats.
-        if self.padding == 'causal':
-            tf_padding = 'VALID'  # Causal padding handled in `call`.
-        elif isinstance(self.padding, six.string_types):
-            tf_padding = self.padding.upper()
-        else:
-            tf_padding = self.padding
+    #     # Convert Keras formats to TF native formats.
+    #     if self.padding == 'causal':
+    #         tf_padding = 'VALID'  # Causal padding handled in `call`.
+    #     elif isinstance(self.padding, six.string_types):
+    #         tf_padding = self.padding.upper()
+    #     else:
+    #         tf_padding = self.padding
 
-        tf_dilations = list(self.dilation_rate)
-        tf_strides = list(self.strides)
-        tf_op_name = self.__class__.__name__
+    #     tf_dilations = list(self.dilation_rate)
+    #     tf_strides = list(self.strides)
+    #     tf_op_name = self.__class__.__name__
 
-        self._convolution_op = functools.partial(
-            nn_ops.convolution_v2,
-            strides=tf_strides,
-            padding=tf_padding,
-            dilations=tf_dilations,
-            data_format=self._tf_data_format,
-            name=tf_op_name)
+    #     self._convolution_op = functools.partial(
+    #         nn_ops.convolution_v2,
+    #         strides=tf_strides,
+    #         padding=tf_padding,
+    #         dilations=tf_dilations,
+    #         data_format=self._tf_data_format,
+    #         name=tf_op_name)
 
-        self.built = True
+    #     self.built = True
 
     def call(self, inputs):
         _site = inputs

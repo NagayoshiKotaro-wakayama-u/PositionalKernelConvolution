@@ -4,6 +4,7 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 from tensorflow.keras.layers import Input,Conv2D, Dense, Flatten, AveragePooling2D, GlobalAveragePooling2D
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.constraints import NonNeg
 from PIL import Image
 from libs.layers import PConv2D, siteConv, siteDeconv, Encoder,Decoder,PKEncoder
 from libs.util import cmap,SqueezedNorm,pool2d
@@ -183,7 +184,7 @@ class InpaintingModel(tf.keras.Model):
 
 
 #========================================
-# PartialConv UNet
+# PartialConv UNet（既存法）
 ## InpaintingUNetを継承し、モデルの構築・コンパイルのみ記述
 class PConvUnetModel(InpaintingModel):
     def __init__(self, encStride=(2,2),**kwargs):
@@ -241,7 +242,7 @@ class PConvUnetModel(InpaintingModel):
         return self((masked_imgs, mask), training=False)
 
 #========================================
-# PositionalKernelConv UNet
+# PositionalKernelConv UNet（不使用）
 ## 位置依存な畳み込みを行うUNet
 ## siteCNNを内部に持つ
 class PKConvUNetAndSiteCNN(InpaintingModel):
@@ -448,7 +449,7 @@ class PKConvUNetAndSiteCNN(InpaintingModel):
         return self((masked_imgs, mask, site), training=False)
 
 #========================================
-# concat-PartialConv UNet
+# concat-PartialConv UNet（不使用）
 ## 位置特性をチャネル方向に結合する
 class chConcatPConvUNet(PConvUnetModel):
     def call(self, data, training=True):# data=(masked_imgs, mask)
@@ -461,11 +462,11 @@ class chConcatPConvUNet(PConvUnetModel):
 # PConv + 学習可能な位置特性
 ## 位置特性を学習によって取得する
 ## L1ノルム最小化でスパースにする
-
 class PConvLearnSite(PConvUnetModel):
-    def __init__(self, opeType='mul', obsOnlyL1 = False, fullLayer=False, siteLayers=[1], localLasso=False, **kwargs):
+    def __init__(self, opeType='mul', obsOnlyL1 = False, fullLayer=False, siteLayers=[1], Lasso=False,  localLasso=False, **kwargs):
         super().__init__(**kwargs)
         # pdb.set_trace()
+        self.phase = 0
 
         if len(siteLayers) != len(list(set(siteLayers))):
             # 重複がある場合はNG
@@ -481,6 +482,7 @@ class PConvLearnSite(PConvUnetModel):
         self.opeType = opeType
         self.obsOnlyL1 = obsOnlyL1
         self.localLasso = localLasso
+        self.Lasso = Lasso
         if self.localLasso:
             self.lasso_conv = functools.partial(
                 nn_ops.convolution_v2,
@@ -546,7 +548,6 @@ class PConvLearnSite(PConvUnetModel):
                 self.exist_imgs.append(resized_img)
 
     def build_pconv_unet(self, masked, mask, training=True, extract=""):
-
         # 位置特性の適用
         def applySite(x,i):
             # その層に位置特性
@@ -658,17 +659,14 @@ class PConvLearnSite(PConvUnetModel):
                 if self.obsOnlyL1:
                     res = K.sum(K.abs(siteDelta*mask))/K.sum(mask)
                 else:
-                    res = K.mean(siteDelta)
-            
+                    res = K.mean(K.abs(siteDelta))
             else:
-
                 res = 0
                 for i,_ in enumerate(self.siteLayers):
                     if self.obsOnlyL1:
                         res = K.sum(K.abs(siteDeltas[i]*masks[i]))/K.sum(masks[i])
                     else:
-                        res = K.mean(siteDeltas[i])
-
+                        res = K.mean(K.abs(siteDeltas[i]))
             return res
         return loss_L1site
 
@@ -690,8 +688,10 @@ class PConvLearnSite(PConvUnetModel):
 
             if self.localLasso:
                 l1SiteLoss = self.LocalLasso_site(mask)(y_true, y_pred)
-            else:
+            elif self.Lasso:
                 l1SiteLoss = self.L1_site(mask)(y_true, y_pred)
+            else:
+                l1SiteLoss = 0
 
             # # 各損失項の重み
             w1,w2,w3 = self.loss_weights
@@ -722,7 +722,7 @@ class PConvLearnSite(PConvUnetModel):
                 run_eagerly=True
             )
    
-    def plotSiteFeature(self, epoch=None, plotSitePath="",saveName=""):
+    def plotSiteFeature(self, epoch=None, plotSitePath="",saveName="",existmask=True):
         # pdb.set_trace()
         for i,sind in enumerate(self.siteLayers):
 
@@ -738,7 +738,8 @@ class PConvLearnSite(PConvUnetModel):
             smax = np.max(_s)
             smin = np.min(_s)
 
-            _s[exist==0] = -10000
+            if existmask:
+                _s[exist==0] = -10000
             # cmbwr = plt.get_cmap('viridis')
             cmbwr = plt.get_cmap('bwr')
             cmbwr.set_under('black')
@@ -750,6 +751,38 @@ class PConvLearnSite(PConvUnetModel):
                 
             plt.savefig(f"{plotSitePath}{os.sep}{saveName}_layer{sind}.png")
     
+    def changeTrainPhase(self, phase):
+        self.phase = phase
+
+    def train_step(self, data):# data=(masked_imgs, mask, gt_imgs)
+        (masked_imgs, mask, gt_imgs) = data[0]
+        
+        # 勾配の取得
+        with tf.GradientTape() as tape:
+            pred_imgs = self((masked_imgs, mask), training=True)
+            loss = self.compiled_loss(gt_imgs, pred_imgs)
+
+        # 勾配によるパラメータの更新
+        trainable_vars = self.trainable_variables
+        # pdb.set_trace()
+
+        if self.phase == 1 or self.phase == 3: # 位置特性の学習なし
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' not in  v.name) and ('site_conv' not in v.name)
+            ]
+        elif self.phase == 2: # 位置特性と位置特性のConvのみ学習
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' in  v.name) or ('site_conv' in v.name)
+            ]
+
+        gradients = tape.gradient(loss, trainable_vars)
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        
+        # 評価値の更新
+        self.compiled_metrics.update_state(gt_imgs, pred_imgs)
+
+        return {m.name: m.result() for m in self.metrics}
+
     # テスト用
     def setSiteFeature(self, site):
         if self.onlyInputSite:
@@ -771,6 +804,7 @@ class PConvLearnSite(PConvUnetModel):
 class PKConvLearnSite(InpaintingModel):
     def __init__(self, opeType='mul', obsOnlyL1 = False, **kwargs):
         super().__init__(**kwargs)
+        self.phase = 0
 
         if opeType=="add":
             self.initValue = np.zeros([1,self.img_rows,self.img_cols,1])
@@ -807,7 +841,6 @@ class PKConvLearnSite(InpaintingModel):
 
         ## output
         self.conv2d = Conv2D(1, 1, activation='sigmoid', name='output_img')
-        #========================================================
 
     def build_pkconv_unet(self, masked, mask, training=True):
         # pdb.set_trace()
@@ -826,7 +859,6 @@ class PKConvLearnSite(InpaintingModel):
         outputs = self.conv2d(d_conv10)
 
         return outputs
-
 
     def L1_site(self, mask):
         siteDelta = self.siteFeature - self.initValue
@@ -906,6 +938,38 @@ class PKConvLearnSite(InpaintingModel):
         output = self.build_pkconv_unet(masked_imgs, mask, training=training)
         return output
 
+    def changeTrainPhase(self, phase):
+        self.phase = phase
+
+    def train_step(self, data):# data=(masked_imgs, mask, gt_imgs)
+        (masked_imgs, mask, gt_imgs) = data[0]
+        
+        # 勾配の取得
+        with tf.GradientTape() as tape:
+            pred_imgs = self((masked_imgs, mask), training=True)
+            loss = self.compiled_loss(gt_imgs, pred_imgs)
+
+        # 勾配によるパラメータの更新
+        trainable_vars = self.trainable_variables
+        # pdb.set_trace()
+
+        if self.phase == 1 or self.phase == 3: # 位置特性の学習なし
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' not in  v.name) and ('site_conv' not in v.name)
+            ]
+        elif self.phase == 2: # 位置特性と位置特性のConvのみ学習
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' in  v.name) or ('site_conv' in v.name)
+            ]
+
+        gradients = tape.gradient(loss, trainable_vars)
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        
+        # 評価値の更新
+        self.compiled_metrics.update_state(gt_imgs, pred_imgs)
+
+        return {m.name: m.result() for m in self.metrics}
+
     # テスト用
     def setSiteFeature(self, site):
         self.siteFeature.assign(site)
@@ -918,6 +982,8 @@ class PKConvLearnSite(InpaintingModel):
 class PConv_ConditionalSite(PConvLearnSite):
     def __init__(self, siteNum=3, opeType='mul', obsOnlyL1 = False, siteLayers=[1], localLasso=False, **kwargs):
         super().__init__(**kwargs)
+
+        self.phase = 0
 
         if len(siteLayers) != len(list(set(siteLayers))):
             # 重複がある場合はNG
@@ -998,7 +1064,6 @@ class PConv_ConditionalSite(PConvLearnSite):
 
                 _s = self.siteFeatures[wind]
                 _s = K.tile(_s,[x.shape[0],1,1,x.shape[-1]]) # _s:[N,w,h,class]
-                pdb.set_trace()
                 
                 # lab:[N,w,h,class]
                 lab = K.tile(labels[:,np.newaxis,np.newaxis,:],[1,_s.shape[1],_s.shape[2],1])
@@ -1177,6 +1242,38 @@ class PConv_ConditionalSite(PConvLearnSite):
                     
                 plt.savefig(f"{plotSitePath}{os.sep}{saveName}_layer{sind}channel{j+1}.png")
     
+    def changeTrainPhase(self, phase):
+        self.phase = phase
+
+    def train_step(self, data):# data=(masked_imgs, mask, gt_imgs)
+        (masked_imgs, mask, gt_imgs) = data[0]
+        
+        # 勾配の取得
+        with tf.GradientTape() as tape:
+            pred_imgs = self((masked_imgs, mask), training=True)
+            loss = self.compiled_loss(gt_imgs, pred_imgs)
+
+        # 勾配によるパラメータの更新
+        trainable_vars = self.trainable_variables
+        # pdb.set_trace()
+
+        if self.phase == 1 or self.phase == 3: # 位置特性の学習なし
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' not in  v.name) and ('site_conv' not in v.name)
+            ]
+        elif self.phase == 2: # 位置特性と位置特性のConvのみ学習
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' in  v.name) or ('site_conv' in v.name)
+            ]
+
+        gradients = tape.gradient(loss, trainable_vars)
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        
+        # 評価値の更新
+        self.compiled_metrics.update_state(gt_imgs, pred_imgs)
+
+        return {m.name: m.result() for m in self.metrics}
+
     # テスト用
     def setSiteFeature(self, site):
         if self.onlyInputSite:
@@ -1189,22 +1286,106 @@ class PConv_ConditionalSite(PConvLearnSite):
 
 
 #=====================================
+############################################
 class branchPConv_lSite(PConvLearnSite):
-    def __init__(self, **kwargs):
-        super(branchPConv_lSite, self).__init__(**kwargs)
+    def __init__(self, opeType='mul', obsOnlyL1 = False, fullLayer=False, siteLayers=[1], Lasso=False,  localLasso=False, nonNeg=False, **kwargs):
+        super(PConvLearnSite,self).__init__(**kwargs)
+        # pdb.set_trace()
         self.phase = 0
+        self.nonNegative = nonNeg        
+        sconv_constraint = NonNeg() if nonNeg else None
+        
         # 位置特性のConvolution
-        self.siteConv1 = siteConv(filters=64, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False)
-        self.siteConv2 = siteConv(filters=128, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False)
+        self.siteConv1 = siteConv(filters=64, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, kernel_constraint=sconv_constraint)
+        self.siteConv2 = siteConv(filters=128, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, kernel_constraint=sconv_constraint)
 
-        # self.siteConv1 = Conv2D(filters=64, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, name="site_conv")
-        # self.siteConv2 = Conv2D(filters=128,strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, name="site_conv_1")
+        if len(siteLayers) != len(list(set(siteLayers))):
+            # 重複がある場合はNG
+            assert "siteLayers must be no duplication"
+
+        # 乗算も加算もどちらでも初期値は0
+        if opeType=="add" or opeType=="mul":
+            self.initValue = np.zeros([1,self.img_rows,self.img_cols,1])
+            self.scenter = 0
+
+        # 以下PConvLearnSiteと同様の処理 #
+        ###############################################################
+        ###############################################################
+        self.opeType = opeType
+        self.obsOnlyL1 = obsOnlyL1
+        self.localLasso = localLasso
+        self.Lasso = Lasso
+        if self.localLasso:
+            self.lasso_conv = functools.partial(
+                nn_ops.convolution_v2,
+                strides=[1,1],
+                padding="SAME",
+                dilations=[1,1],
+                data_format="NHWC",
+                name="lassoConv")
+            self.lasso_kernel = np.ones([16,16,1,1]).astype("float32")
+
+
+        self.site_fullLayer = fullLayer
+        # エンコーダの層数
+        self.encLayerNum = 5
+        # 位置特性を適用する層数(lnum)
+        if fullLayer:
+            self.siteLayers = [i+1 for i in range(self.encLayerNum)]
+            self.lnum = self.encLayerNum
+        else:
+            self.siteLayers = siteLayers
+            self.lnum = len(list(set(self.siteLayers)))
+        
+        # 入力層だけに学習可能な位置特性を設けている場合
+        self.onlyInputSite = siteLayers[0] == 1 and self.lnum == 1
+        if self.onlyInputSite:
+            self.siteFeature = tf.Variable(
+                self.initValue,
+                trainable = True,
+                name = "siteFeature-sparse",
+                dtype = tf.float32
+            )
+        else:
+            self.initValues = []
+            self.siteFeatures = []
+            self.exist_imgs = []
+            # 位置特性の初期値・学習するパラメータを設定
+            for lind in self.siteLayers:
+                i = lind - 1
+                size = [1,self.img_rows//(2**i),self.img_cols//(2**i),1]
+                if opeType=="add" or opeType=="mul":
+                    init_v = np.zeros(size)
+                # elif opeType=="mul":
+                #     init_v = np.ones(size)
+
+                self.initValues.append(init_v)
+                self.siteFeatures.append(
+                    tf.Variable(
+                        init_v,
+                        trainable = True,
+                        name = f"siteFeature-sparse{i}",
+                        dtype = tf.float32
+                    )
+                )
+                # pdb.set_trace()
+                resized_img = cv2.resize(
+                    self.exist_img[0,:,:,0],
+                    dsize=(
+                        self.img_rows//(2**i),
+                        self.img_cols//(2**i)
+                    )
+                )
+                _, resized_img = cv2.threshold(resized_img,0.5,1,cv2.THRESH_BINARY)
+                self.exist_imgs.append(resized_img)
 
     def build_pconv_unet(self, masked, mask, training=True, extract="", phase=0):
+        # pdb.set_trace()
+        
         # 位置特性の適用
         def applySite(x,i,extract=""):
-            # その層に位置特性
-            if i in self.siteLayers:
+            # 指定された層に位置特性を導入
+            if (i in self.siteLayers):
                 wind = self.siteLayers.index(i)
                 _s = self.siteFeature if self.onlyInputSite else self.siteFeatures[wind]
                 _s = K.tile(_s,[x.shape[0],1,1,1])
@@ -1212,17 +1393,21 @@ class branchPConv_lSite(PConvLearnSite):
                 # 位置特性のCNN
                 sconv1 = self.siteConv1(_s)
                 sconv2 = self.siteConv2(sconv1)
-
+                
+                if self.phase == 1: # sconvのFreeze時は、PConvに影響を与えないようにする
+                    sconv2 = sconv2*0
+                
                 if self.opeType=="add":
                     res = x + sconv2
                 elif self.opeType=="mul":
-                    res = x * sconv2
+                    res = x * (sconv2+1)
             else:
                 res = x
 
+            ### デバッグ用の機能 ##############
             if extract != "":
                 exec(f"res = {extract}")
-
+            ##################################
             return res
 
         e_conv1, e_mask1 = self.encoder1(applySite(masked,1), mask, istraining=training)
@@ -1244,35 +1429,54 @@ class branchPConv_lSite(PConvLearnSite):
                 
         return outputs
 
-    def plotSiteFeature(self, epoch=None, plotSitePath="", saveName="", plotfmap=True):
+    def getSiteFeature(self):
+        sf = self.siteFeature.numpy() if self.onlyInputSite else [_s.numpy() for _s in self.siteFeatures]
+        return sf
 
-        super(branchPConv_lSite, self).plotSiteFeature(
-            epoch=epoch,plotSitePath=plotSitePath,saveName=saveName
-        )
+    def plotSiteFeature(self, epoch=None, plotSitePath="", saveName="", plotfmap=True, existmask=True, samescale=False):
+
+        if saveName == "":
+            saveName = f"siteFeature{epoch}"
 
         if plotfmap:
-
-            for i in self.siteLayers:
+            for i,exist in zip(self.siteLayers,self.exist_imgs):
                 wind = self.siteLayers.index(i)
-                _s = self.siteFeature if self.onlyInputSite else self.siteFeatures[wind]
-
-                plt.clf()       
-                plt.close()
-                plot_chmax = 64
+                sf = self.siteFeature if self.onlyInputSite else self.siteFeatures[wind]
                 plot_w, plot_h = [8,8]
-
-                # 位置特性のCNN
-                sconv1 = self.siteConv1(_s)
-                sconv2 = self.siteConv2(sconv1)
-                plotsconv2 = sconv2[0,:,:,:plot_chmax]
-                
-                smax = np.max(plotsconv2)
-                smin = np.min(plotsconv2)
-
-                # cmbwr = plt.get_cmap('viridis')
+                plot_chmax = plot_w * plot_h
                 cmbwr = plt.get_cmap('bwr')
                 cmbwr.set_under('black')
 
+                # 位置特性のCNN
+                sconv1 = self.siteConv1(sf)
+                sconv2 = self.siteConv2(sconv1)
+                plotsconv2 = sconv2[0,:,:,:plot_chmax].numpy()
+                sf = sf.numpy()[0,:,:,0]
+
+                # スケールを同じにする場合
+                if samescale:
+                    smax = max([np.max(_s) for _s in [sf,plotsconv2]])
+                    smin = min([np.min(_s) for _s in [sf,plotsconv2]])
+                else:
+                    smax = np.max(plotsconv2)
+                    smin = np.min(plotsconv2)
+
+                if existmask:
+                    sf[exist==0] = -10000
+
+                if samescale:
+                    plt.clf()
+                    plt.close()
+                    plt.imshow(sf,cmap=cmbwr,norm=SqueezedNorm(vmin=smin,vmax=smax,mid=self.scenter),interpolation='none')
+                    plt.colorbar(extend='both')
+                    plt.savefig(f"{plotSitePath}{os.sep}{saveName}_layer3.png")
+                else:
+                    super(branchPConv_lSite, self).plotSiteFeature(
+                        epoch=epoch,plotSitePath=plotSitePath,saveName=saveName, existmask=existmask
+                    )
+
+                plt.clf()
+                plt.close()
                 _, axes = plt.subplots(plot_h, plot_w, tight_layout=True, figsize=(plot_w*5, plot_h*5))
                 for w in range(plot_w):
                     for h in range(plot_h):
@@ -1284,75 +1488,29 @@ class branchPConv_lSite(PConvLearnSite):
                         )
                         axes[h,w].set_title(f"ch {w + h*plot_w}")
                 
-                if saveName == "":
-                    saveName = f"siteFeature{epoch}"
                 plt.savefig(f"{plotSitePath}{os.sep}{saveName}_sconv2.png")
 
     def compile(self, lr, mask, phase=0):
-        # pdb.set_trace()
         met = [
             self.loss_total(mask),
             self.holeLoss(mask),
             self.validLoss(mask),
             self.tvLoss(mask),
-            self.L1_site(mask),
-            self.PSNR,
+            self.PSNR
         ]
         if self.localLasso:
             met.append(self.LocalLasso_site(mask))
             
-        if phase==0: # モデルを別で学習しない
-            # InpaintingModelの親でコンパイル
-            super(InpaintingModel, self).compile(
-                    optimizer = Adam(lr=lr),
-                    loss= self.loss_total(mask),
-                    metrics=met,
-                    run_eagerly=True
-                )
-        elif phase==1: # InpaintのPConvUNetのみ学習
-            super(InpaintingModel, self).compile(
+        # InpaintingModelの親でコンパイル
+        super(InpaintingModel, self).compile(
                 optimizer = Adam(lr=lr),
                 loss= self.loss_total(mask),
                 metrics=met,
                 run_eagerly=True
             )
-        elif phase==2: # siteCNNのみ学習
-            super(InpaintingModel, self).compile(
-                optimizer = Adam(lr=lr),
-                loss= self.loss_total(mask),
-                metrics=met,
-                run_eagerly=True
-            )
-   
+
     def changeTrainPhase(self, phase):
-
         self.phase = phase
-        def setPconvTrainable(setBool):
-            self.encoder1.trainable = setBool
-            self.encoder2.trainable = setBool
-            self.encoder3.trainable = setBool
-            self.encoder4.trainable = setBool
-            self.encoder5.trainable = setBool
-
-            self.decoder6.trainable = setBool
-            self.decoder7.trainable = setBool
-            self.decoder8.trainable = setBool
-            self.decoder9.trainable = setBool
-            self.decoder10.trainable = setBool
-
-        if phase==1:
-            # pdb.set_trace()
-            self.siteConv1.trainable = False
-            self.siteConv2.trainable = False
-            setPconvTrainable(True)
-        elif phase==2:
-            self.siteConv1.trainable = True
-            self.siteConv2.trainable = True
-            setPconvTrainable(False)
-
-    def siteFreeze(self):
-        for _s in self.siteFeatures:
-            _s.trainable = False        
 
     def train_step(self, data):# data=(masked_imgs, mask, gt_imgs)
         (masked_imgs, mask, gt_imgs) = data[0]
@@ -1366,9 +1524,230 @@ class branchPConv_lSite(PConvLearnSite):
         trainable_vars = self.trainable_variables
         # pdb.set_trace()
 
-        if self.phase == 1: # 位置特性の学習なし
+        if self.phase == 1 or self.phase == 3: # 位置特性の学習なし
             trainable_vars = [
                 v for v in trainable_vars if ('siteFeature' not in  v.name) and ('site_conv' not in v.name)
+            ]
+        elif self.phase == 2: # 位置特性と位置特性のConvのみ学習
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' in  v.name) or ('site_conv' in v.name)
+            ]
+        elif self.phase == 4: # 位置特性マップのみ
+            trainable_vars = [
+                v for v in trainable_vars if 'siteFeature' in  v.name
+            ]
+        elif self.phase == 5: # 位置特性Convのみ学習
+            trainable_vars = [
+                v for v in trainable_vars if 'site_conv' in v.name
+            ]
+            
+        gradients = tape.gradient(loss, trainable_vars)
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        
+        # 評価値の更新
+        self.compiled_metrics.update_state(gt_imgs, pred_imgs)
+
+        return {m.name: m.result() for m in self.metrics}
+
+
+
+class branchPKConv_lSite(InpaintingModel):
+    def __init__(self, opeType='add', siteLayers=[1], nonNeg=False, **kwargs):
+        super().__init__(**kwargs)
+        self.phase = 0
+        self.siteLayers = siteLayers
+        self.nonNegative = nonNeg
+        sconv_constraint = NonNeg() if nonNeg else None
+
+        channels = [1,64,128,256,512,512]
+        self.encksize = [7,5,5,3,3]
+        sconvChannel = channels[siteLayers[0]-1]
+
+        # 位置特性のConvolution
+        self.siteConv1 = siteConv(filters=sconvChannel//2, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, kernel_constraint=sconv_constraint)
+        self.siteConv2 = siteConv(filters=sconvChannel, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, kernel_constraint=sconv_constraint)
+        
+        self.opeType = opeType
+        self.scenter = 0
+
+        self.initValues = []
+        self.siteFeatures = []
+        self.exist_imgs = []
+        # 位置特性の初期値・学習するパラメータを設定
+        for lind in self.siteLayers:
+            i = lind - 1
+            size = [1,self.img_rows//(2**i),self.img_cols//(2**i),1]
+            # 乗算も加算もどちらでも初期値は0
+            if opeType=="add" or opeType=="mul":
+                init_v = np.zeros(size)
+
+            self.initValues.append(init_v)
+            self.siteFeatures.append(
+                tf.Variable(
+                    init_v,
+                    trainable = True,
+                    name = f"siteFeature-sparse{i}",
+                    dtype = tf.float32
+                )
+            )
+            # pdb.set_trace()
+            resized_img = cv2.resize(
+                self.exist_img[0,:,:,0],
+                dsize=(
+                    self.img_rows//(2**i),
+                    self.img_cols//(2**i)
+                )
+            )
+            _, resized_img = cv2.threshold(resized_img,0.5,1,cv2.THRESH_BINARY)
+            self.exist_imgs.append(resized_img)
+
+        ## encoder
+        # siteLayersで指定されたEncoderを返す
+        def applyPK(lind):
+            bn = lind!=1 # 1層目のみbn=Falseとなる
+            if lind in siteLayers:
+                return PKEncoder(channels[lind], self.encksize[lind-1], siteInputChan=channels[lind-1], opeType=opeType,bn=bn)
+            else:
+                return Encoder(channels[lind], self.encksize[lind-1], lind, bn=bn)
+
+        self.encoder1 = applyPK(1)
+        self.encoder2 = applyPK(2)
+        self.encoder3 = applyPK(3)
+        self.encoder4 = applyPK(4)
+        self.encoder5 = applyPK(5)
+
+        ## decoder
+        self.decoder6 = Decoder(channels[4], 3)
+        self.decoder7 = Decoder(channels[3], 3)
+        self.decoder8 = Decoder(channels[2], 3)
+        self.decoder9 = Decoder(channels[1], 3)
+        self.decoder10 = Decoder(3, 3, bn=False)
+        ## output
+        self.conv2d = Conv2D(1,1,activation='sigmoid',name='output_img')
+        
+    def build_pkconv_unet(self, masked, mask, training=True):
+        
+        def applySite(x1, x2, lind):
+            encArgs=[x1, x2]
+            if lind in self.siteLayers:
+                wind = self.siteLayers.index(lind)
+                sconv1 = self.siteConv1(self.siteFeatures[wind])
+                sconv2 = self.siteConv2(sconv1)
+                if self.opeType=="mul":
+                    sconv2 = sconv2 + 1
+
+                encArgs.append(sconv2)
+            return encArgs
+
+        # pdb.set_trace()
+        e_conv1, e_mask1 = self.encoder1(*applySite(masked, mask, 1), istraining=training)
+        e_conv2, e_mask2 = self.encoder2(*applySite(e_conv1, e_mask1, 2), istraining=training)
+        e_conv3, e_mask3 = self.encoder3(*applySite(e_conv2, e_mask2, 3), istraining=training)
+        e_conv4, e_mask4 = self.encoder4(*applySite(e_conv3, e_mask3, 4), istraining=training)
+        e_conv5, e_mask5 = self.encoder5(*applySite(e_conv4, e_mask4, 5), istraining=training)
+
+        d_conv6, d_mask6 = self.decoder6(e_conv5, e_mask5, e_conv4, e_mask4, istraining=training)
+        d_conv7, d_mask7 = self.decoder7(d_conv6, d_mask6, e_conv3, e_mask3, istraining=training)
+        d_conv8, d_mask8 = self.decoder8(d_conv7, d_mask7, e_conv2, e_mask2, istraining=training)
+        d_conv9, d_mask9 = self.decoder9(d_conv8, d_mask8, e_conv1, e_mask1, istraining=training)
+        d_conv10, _ = self.decoder10(d_conv9, d_mask9, masked, mask, istraining=training)
+
+        outputs = self.conv2d(d_conv10)
+
+        return outputs
+
+    def call(self, data, training=True):# data=(masked_imgs, mask)
+        (masked_imgs, mask) = data
+        output = self.build_pkconv_unet(masked_imgs, mask, training=training)
+        return output
+
+    def plotSiteFeature(self, epoch=None, plotSitePath="", saveName="", plotfmap=True, existmask=True, samescale=False):
+
+        if saveName == "":
+            saveName = f"siteFeature{epoch}"
+
+        if plotfmap:
+            # pdb.set_trace()
+            for i,exist in zip(self.siteLayers,self.exist_imgs):
+                wind = self.siteLayers.index(i)
+                sf = self.siteFeatures[wind]
+                plot_w, plot_h = [8,8]
+                plot_chmax = plot_w * plot_h
+                cmbwr = plt.get_cmap('bwr')
+                cmbwr.set_under('black')
+
+                # 位置特性のCNN
+                sconv1 = self.siteConv1(sf)
+                sconv2 = self.siteConv2(sconv1)
+                plotsconv2 = sconv2[0,:,:,:plot_chmax].numpy()
+                sf = sf.numpy()[0,:,:,0]
+
+                # スケールを同じにする場合
+                if samescale:
+                    smax = max([np.max(_s) for _s in [sf,plotsconv2]])
+                    smin = min([np.min(_s) for _s in [sf,plotsconv2]])
+                else:
+                    smax = np.max(plotsconv2)
+                    smin = np.min(plotsconv2)
+
+                if existmask:
+                    sf[exist==0] = -10000
+
+                plt.clf()
+                plt.close()
+                plt.imshow(sf,cmap=cmbwr,norm=SqueezedNorm(vmin=smin,vmax=smax,mid=self.scenter),interpolation='none')
+                plt.colorbar(extend='both')
+                plt.savefig(f"{plotSitePath}{os.sep}{saveName}_layer3.png")
+
+                plt.clf()
+                plt.close()
+                _, axes = plt.subplots(plot_h, plot_w, tight_layout=True, figsize=(plot_w*5, plot_h*5))
+                for w in range(plot_w):
+                    for h in range(plot_h):
+                        axes[h,w].imshow(
+                            plotsconv2[:,:, w + h*plot_w],
+                            cmap=cmbwr,
+                            norm=SqueezedNorm(vmin=smin,vmax=smax,mid=self.scenter),
+                            interpolation='none'
+                        )
+                        axes[h,w].set_title(f"ch {w + h*plot_w}")
+                
+                plt.savefig(f"{plotSitePath}{os.sep}{saveName}_sconv2.png")
+    
+    def getSiteFeature(self):
+        sf = [_s.numpy() for _s in self.siteFeatures]
+        return sf
+
+    def changeTrainPhase(self, phase):
+        self.phase = phase
+
+    def train_step(self, data):# data=(masked_imgs, mask, gt_imgs)
+        (masked_imgs, mask, gt_imgs) = data[0]
+        
+        # 勾配の取得
+        with tf.GradientTape() as tape:
+            pred_imgs = self((masked_imgs, mask), training=True)
+            loss = self.compiled_loss(gt_imgs, pred_imgs)
+
+        # 勾配によるパラメータの更新
+        trainable_vars = self.trainable_variables
+        # pdb.set_trace()
+
+        if self.phase == 1 or self.phase == 3: # 位置特性の学習なし
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' not in  v.name) and ('site_conv' not in v.name)
+            ]
+        elif self.phase == 2: # 位置特性と位置特性のConvのみ学習
+            trainable_vars = [
+                v for v in trainable_vars if ('siteFeature' in  v.name) or ('site_conv' in v.name)
+            ]
+        elif self.phase == 4: # 位置特性マップのみ
+            trainable_vars = [
+                v for v in trainable_vars if 'siteFeature' in  v.name
+            ]
+        elif self.phase == 5: # 位置特性Convのみ学習
+            trainable_vars = [
+                v for v in trainable_vars if 'site_conv' in v.name
             ]
 
         gradients = tape.gradient(loss, trainable_vars)
@@ -1378,8 +1757,6 @@ class branchPConv_lSite(PConvLearnSite):
         self.compiled_metrics.update_state(gt_imgs, pred_imgs)
 
         return {m.name: m.result() for m in self.metrics}
-
-        
 
 
 
@@ -1427,7 +1804,5 @@ class sharePConv_lSite(PConvLearnSite):
             exec(f"outputs = {extract}")
                 
         return outputs
-
-        
 
 
