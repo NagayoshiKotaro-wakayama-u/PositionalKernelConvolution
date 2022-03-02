@@ -246,9 +246,9 @@ class PKConv(tf.keras.layers.Conv2D):
 
         self.built = True
 
-
     def call(self, inputs, mask=None):
         _img, _mask, _site = inputs
+
         if _site.shape[0] == 1:
             _site = K.tile(_site,[_img.shape[0],1,1,1])
 
@@ -256,58 +256,38 @@ class PKConv(tf.keras.layers.Conv2D):
             # Apply convolutions to image (W*X)
             wx = self._convolution_op(_img*_mask, self.kernel)
 
-            # 特徴マップのチャネル数より位置特性の枚数が少ない場合 ← 考慮しないことに(2022/02/07)
-            # 末尾に次元を追加してタイル（位置特性ごとに塊ができるようにタイルするため）
-            # posEmb = K.tile(tf.expand_dims(_site[:1],-1),[1,1,1,1,self.tileNum])
-            # posEmb = tf.reshape(posEmb,shape=[1]+_img.shape[1:3]+[self.tileNum*self.siteInputChan])
-            # tiled_images = K.tile(_img,[1,1,1,self.siteInputChan])
-            
-            posEmb = _site
-
             ## PXにもマスクをかける ← 2022/02/28
-            # PX = P(位置特性)  ×  X(特徴マップ) x mask
-            pxs = posEmb*_img*_mask
-
-            # 複数チャネル＆加重和のための重み
-            if self.siteInputChan > 1 and self.multiSiteW_Learn:
-                multiSiteW_softed = K.softmax(self.multiSiteW)
+            # PX = P(位置特性)  ×  X(特徴マップ)
+            pxs = _site*(_mask*_img)
 
             # 各チャネルの統合
-            # pdb.set_trace()
             px = self._convolution_op(pxs,self.onesKernel)
-            # px = 0
-            # for c_ind in range(self.siteInputChan):
-            #     pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
-            #     pxi = self._convolution_op(pxi, self.onesKernel)
-            #     # px = pxi + px # TODO:いずれはAttenntionなどによる重みつき和を計算したい
-            #     if self.siteInputChan > 1 and self.multiSiteW_Learn:# 重み和の計算で重みを学習するかどうか
-            #         px += multiSiteW_softed[c_ind] * pxi
-            #     else: # 平均を取る
-            #         px += pxi / self.siteInputChan
 
+            # (W+P)X = WX + PX
             outputs_img = wx + px
 
         elif self.opeType == "mul": # 位置特性を掛け算
             # pdb.set_trace()
-            tiled_images = K.tile(_img,[1,1,1,self.siteInputChan]) # 入力画像・特徴マップ
+            # tiled_images = K.tile(_img,[1,1,1,self.siteInputChan]) # 入力画像・特徴マップ
             # posEmb = K.tile(_site,[1,1,1,self.tileNum]) # 位置特性
-            posEmb = tf.reshape(tf.tile(tf.expand_dims(_site,-1),[1,1,1,1,self.tileNum]),tiled_images.shape)
-            pxs = posEmb*tiled_images
-            
-            outputs_img = 0
+            # posEmb = tf.reshape(tf.tile(tf.expand_dims(_site,-1),[1,1,1,1,self.tileNum]),tiled_images.shape)
+            # pxs = posEmb*tiled_images
+            pxs = _site * (_img * _mask)
 
+            outputs_img = self._convolution_op(pxs, self.kernel) # 2022/02/28
+            # outputs_img = 0
             # 複数チャネル＆加重和のための重み
-            if self.siteInputChan > 1 and self.multiSiteW_Learn:
-                multiSiteW_softed = K.softmax(self.multiSiteW)
+            # if self.siteInputChan > 1 and self.multiSiteW_Learn:
+            #     multiSiteW_softed = K.softmax(self.multiSiteW)
                 
-            for c_ind in range(self.siteInputChan):
-                pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
-                img_out = self._convolution_op(pxi*_mask, self.kernel)
+            # for c_ind in range(self.siteInputChan):
+            #     pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
+            #     img_out = self._convolution_op(pxi*_mask, self.kernel)
                 
-                if self.siteInputChan > 1 and self.multiSiteW_Learn:# 重み和の計算で重みを学習するかどうか
-                    outputs_img += multiSiteW_softed[c_ind] * img_out
-                else: # 平均を取る
-                    outputs_img += 1/self.siteInputChan * img_out
+            #     if self.siteInputChan > 1 and self.multiSiteW_Learn:# 重み和の計算で重みを学習するかどうか
+            #         outputs_img += multiSiteW_softed[c_ind] * img_out
+            #     else: # 平均を取る
+            #         outputs_img += 1/self.siteInputChan * img_out
 
         outputs_mask = self._convolution_op(_mask, self.kernel_mask)
         # Calculate the mask ratio on each pixel in the output mask
@@ -350,16 +330,7 @@ class PKEncoder(tf.keras.layers.Layer):
             self.sitemax = max(site_range)
 
     def call(self,img_in,mask_in,site_in, istraining=True):
-        # 位置特性を適用する前に値域を制限
-        if self.siteSigmoid:
-            site = K.sigmoid(site_in)
-            site = site * (self.sitemax - self.sitemin) + self.sitemin
-        elif self.siteClip:
-            site = K.clip(site_in, self.sitemax, self.sitemin)
-        else:
-            site = site_in
-
-        output = self.pkconv((img_in, mask_in, site))
+        output = self.pkconv((img_in, mask_in, site_in))
         conv = output[0] # img
 
         if self.bn:

@@ -843,7 +843,6 @@ class PKConvLearnSite(InpaintingModel):
         self.conv2d = Conv2D(1, 1, activation='sigmoid', name='output_img')
 
     def build_pkconv_unet(self, masked, mask, training=True):
-        # pdb.set_trace()
         e_conv1, e_mask1 = self.encoder1(masked, mask, self.siteFeature, istraining=training)
         e_conv2, e_mask2 = self.encoder2(e_conv1, e_mask1, istraining=training)
         e_conv3, e_mask3 = self.encoder3(e_conv2, e_mask2, istraining=training)
@@ -889,11 +888,9 @@ class PKConvLearnSite(InpaintingModel):
             # # 欠損部のまわり1pxの誤差
             l3 = self.tvLoss(mask)(y_true, y_pred)
 
-            l1SiteLoss = self.L1_site(mask)(y_true, y_pred)
-
             # # 各損失項の重み
             w1,w2,w3 = self.loss_weights
-            res = w1*l1 + w2*l2 + l1SiteLoss
+            res = w1*l1 + w2*l2
             # total_loss = tf.add(w1*l1,w2*l2,name="loss_total")
             total_loss = tf.add(res,w3*l3,name="loss_total")
             return total_loss
@@ -910,7 +907,6 @@ class PKConvLearnSite(InpaintingModel):
                     self.holeLoss(mask),
                     self.validLoss(mask),
                     self.tvLoss(mask),
-                    self.L1_site(mask),
                     self.PSNR
                 ],
                 run_eagerly=True
@@ -951,7 +947,6 @@ class PKConvLearnSite(InpaintingModel):
 
         # 勾配によるパラメータの更新
         trainable_vars = self.trainable_variables
-        # pdb.set_trace()
 
         if self.phase == 1 or self.phase == 3: # 位置特性の学習なし
             trainable_vars = [
@@ -969,10 +964,6 @@ class PKConvLearnSite(InpaintingModel):
         self.compiled_metrics.update_state(gt_imgs, pred_imgs)
 
         return {m.name: m.result() for m in self.metrics}
-
-    # テスト用
-    def setSiteFeature(self, site):
-        self.siteFeature.assign(site)
 
     def getSiteFeature(self):
         return self.siteFeature.numpy()
@@ -1185,8 +1176,10 @@ class PConv_ConditionalSite(PConvLearnSite):
 
             if self.localLasso:
                 l1SiteLoss = self.LocalLasso_site(mask)(y_true, y_pred)
-            else:
+            elif self.Lasso:
                 l1SiteLoss = self.L1_site(mask)(y_true, y_pred)
+            else:
+                l1SiteLoss = 0
 
             # # 各損失項の重み
             w1,w2,w3 = self.loss_weights
@@ -1287,6 +1280,64 @@ class PConv_ConditionalSite(PConvLearnSite):
 
 #=====================================
 ############################################
+class branchInpaintingModel(InpaintingModel):
+
+    # 位置特性マップ・位置特性CNNの定義まで
+    def __init__(self, opeType='add', siteLayers=[1], nonNeg=False, **kwargs):
+        super().__init__(**kwargs)
+
+        if len(siteLayers) != len(list(set(siteLayers))):
+            # 重複がある場合はNG
+            assert "siteLayers must be no duplication"
+
+        self.siteLayers = siteLayers
+        self.nonNegative = nonNeg
+        sconv_constraint = NonNeg() if nonNeg else None
+
+        self.channels = [1,64,128,256,512,512]
+        self.encksize = [7,5,5,3,3]
+        sconvChannel = self.channels[siteLayers[0]-1]
+
+        # 位置特性のConvolution
+        self.siteConv1 = siteConv(filters=sconvChannel//2, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, kernel_constraint=sconv_constraint)
+        self.siteConv2 = siteConv(filters=sconvChannel, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, kernel_constraint=sconv_constraint)
+        
+        self.opeType = opeType
+
+        self.initValues = []
+        self.siteFeatures = []
+        self.exist_imgs = []
+        # 位置特性の初期値・学習するパラメータを設定
+        for lind in self.siteLayers:
+            i = lind - 1
+            size = [1,self.img_rows//(2**i),self.img_cols//(2**i),1]
+            # 乗算も加算もどちらでも初期値は0
+            if opeType=="add" or opeType=="mul":
+                init_v = np.zeros(size)
+
+            self.initValues.append(init_v)
+            self.siteFeatures.append(
+                tf.Variable(
+                    init_v,
+                    trainable = True,
+                    name = f"siteFeature-sparse{i}",
+                    dtype = tf.float32
+                )
+            )
+            # pdb.set_trace()
+            resized_img = cv2.resize(
+                self.exist_img[0,:,:,0],
+                dsize=(
+                    self.img_rows//(2**i),
+                    self.img_cols//(2**i)
+                )
+            )
+            _, resized_img = cv2.threshold(resized_img,0.5,1,cv2.THRESH_BINARY)
+            self.exist_imgs.append(resized_img)
+
+
+
+
 class branchPConv_lSite(PConvLearnSite):
     def __init__(self, opeType='mul', obsOnlyL1 = False, fullLayer=False, siteLayers=[1], Lasso=False,  localLasso=False, nonNeg=False, **kwargs):
         super(PConvLearnSite,self).__init__(**kwargs)
@@ -1551,64 +1602,18 @@ class branchPConv_lSite(PConvLearnSite):
 
 
 
-class branchPKConv_lSite(InpaintingModel):
+class branchPKConv_lSite(branchInpaintingModel):
     def __init__(self, opeType='add', siteLayers=[1], nonNeg=False, **kwargs):
         super().__init__(**kwargs)
-        self.phase = 0
-        self.siteLayers = siteLayers
-        self.nonNegative = nonNeg
-        sconv_constraint = NonNeg() if nonNeg else None
-
-        channels = [1,64,128,256,512,512]
-        self.encksize = [7,5,5,3,3]
-        sconvChannel = channels[siteLayers[0]-1]
-
-        # 位置特性のConvolution
-        self.siteConv1 = siteConv(filters=sconvChannel//2, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, kernel_constraint=sconv_constraint)
-        self.siteConv2 = siteConv(filters=sconvChannel, strides=(1,1), kernel_size=(3,3), padding='same', use_bias=False, kernel_constraint=sconv_constraint)
-        
-        self.opeType = opeType
-        self.scenter = 0
-
-        self.initValues = []
-        self.siteFeatures = []
-        self.exist_imgs = []
-        # 位置特性の初期値・学習するパラメータを設定
-        for lind in self.siteLayers:
-            i = lind - 1
-            size = [1,self.img_rows//(2**i),self.img_cols//(2**i),1]
-            # 乗算も加算もどちらでも初期値は0
-            if opeType=="add" or opeType=="mul":
-                init_v = np.zeros(size)
-
-            self.initValues.append(init_v)
-            self.siteFeatures.append(
-                tf.Variable(
-                    init_v,
-                    trainable = True,
-                    name = f"siteFeature-sparse{i}",
-                    dtype = tf.float32
-                )
-            )
-            # pdb.set_trace()
-            resized_img = cv2.resize(
-                self.exist_img[0,:,:,0],
-                dsize=(
-                    self.img_rows//(2**i),
-                    self.img_cols//(2**i)
-                )
-            )
-            _, resized_img = cv2.threshold(resized_img,0.5,1,cv2.THRESH_BINARY)
-            self.exist_imgs.append(resized_img)
 
         ## encoder
         # siteLayersで指定されたEncoderを返す
         def applyPK(lind):
             bn = lind!=1 # 1層目のみbn=Falseとなる
             if lind in siteLayers:
-                return PKEncoder(channels[lind], self.encksize[lind-1], siteInputChan=channels[lind-1], opeType=opeType,bn=bn)
+                return PKEncoder(self.channels[lind], self.encksize[lind-1], siteInputChan=self.channels[lind-1], opeType=opeType,bn=bn)
             else:
-                return Encoder(channels[lind], self.encksize[lind-1], lind, bn=bn)
+                return Encoder(self.channels[lind], self.encksize[lind-1], lind, bn=bn)
 
         self.encoder1 = applyPK(1)
         self.encoder2 = applyPK(2)
@@ -1617,10 +1622,10 @@ class branchPKConv_lSite(InpaintingModel):
         self.encoder5 = applyPK(5)
 
         ## decoder
-        self.decoder6 = Decoder(channels[4], 3)
-        self.decoder7 = Decoder(channels[3], 3)
-        self.decoder8 = Decoder(channels[2], 3)
-        self.decoder9 = Decoder(channels[1], 3)
+        self.decoder6 = Decoder(self.channels[4], 3)
+        self.decoder7 = Decoder(self.channels[3], 3)
+        self.decoder8 = Decoder(self.channels[2], 3)
+        self.decoder9 = Decoder(self.channels[1], 3)
         self.decoder10 = Decoder(3, 3, bn=False)
         ## output
         self.conv2d = Conv2D(1,1,activation='sigmoid',name='output_img')
