@@ -172,15 +172,10 @@ class Decoder(tf.keras.layers.Layer):
 #=================================================================
 # pkconv
 class PKConv(tf.keras.layers.Conv2D):
-    def __init__(self, *args, siteInputChan=1, opeType="mul",
-        sConvKernelLearn=False, learnMultiSiteW=False, **kwargs):
+    def __init__(self, *args, opeType="mul", **kwargs):
         super().__init__(*args, **kwargs)
         self.input_spec = [InputSpec(min_ndim=4),InputSpec(min_ndim=4),InputSpec(min_ndim=4)]
-
-        self.siteInputChan= siteInputChan
         self.opeType = opeType
-        self.sConvKernelLearn = sConvKernelLearn
-        self.multiSiteW_Learn = learnMultiSiteW
 
     def build(self, input_shape):
         input_shape = tensor_shape.TensorShape(input_shape[0])
@@ -198,30 +193,11 @@ class PKConv(tf.keras.layers.Conv2D):
 
         self.kernel_mask = tf.keras.backend.ones(kernel_shape)
 
-        # 足し算か掛け算か
-        if self.opeType == "add":
-            self.onesKernel = K.constant(np.ones(kernel_shape))
-        elif self.opeType == "mul":
-            self.bias_initializer = tf.keras.initializers.Ones()
+        # 足し算のときに使用
+        self.onesKernel = K.constant(np.ones(kernel_shape))
 
         # Window size - used for normalization
         self.window_size = self.kernel_size[0] * self.kernel_size[1]
-
-        # 特徴マップのチャネル数//位置特性のチャネル数
-        #（位置特性のチャネル数を特徴マップと合わせるために使用）
-        # self.tileNum = input_shape[3]
-        self.tileNum = 1
-
-        if self.siteInputChan > 1 and self.multiSiteW_Learn:
-            self.multiSiteW = self.add_weight(
-                name='multiSiteW',
-                shape=[self.siteInputChan],
-                initializer=self.kernel_initializer,
-                regularizer=self.kernel_regularizer,
-                constraint=self.kernel_constraint,
-                trainable=True,
-                dtype=self.dtype)
-
 
         # Convert Keras formats to TF native formats.
         if self.padding == 'causal':
@@ -252,42 +228,24 @@ class PKConv(tf.keras.layers.Conv2D):
         if _site.shape[0] == 1:
             _site = K.tile(_site,[_img.shape[0],1,1,1])
 
-        if self.opeType == "add": # 位置特性を足し算(W+P)X
+        if self.opeType == "add": # 位置特性を足し算 (W+P)X
             # Apply convolutions to image (W*X)
             wx = self._convolution_op(_img*_mask, self.kernel)
-
             ## PXにもマスクをかける ← 2022/02/28
             # PX = P(位置特性)  ×  X(特徴マップ)
             pxs = _site*(_mask*_img)
-
             # 各チャネルの統合
             px = self._convolution_op(pxs,self.onesKernel)
-
             # (W+P)X = WX + PX
             outputs_img = wx + px
 
-        elif self.opeType == "mul": # 位置特性を掛け算
-            # pdb.set_trace()
-            # tiled_images = K.tile(_img,[1,1,1,self.siteInputChan]) # 入力画像・特徴マップ
-            # posEmb = K.tile(_site,[1,1,1,self.tileNum]) # 位置特性
-            # posEmb = tf.reshape(tf.tile(tf.expand_dims(_site,-1),[1,1,1,1,self.tileNum]),tiled_images.shape)
-            # pxs = posEmb*tiled_images
-            pxs = _site * (_img * _mask)
+        elif self.opeType == "addX": # 位置特性を特徴マップに加算 W(P+X)
+            outputs_img = self._convolution_op((_img+_site)*_mask, self.kernel)
 
+        elif self.opeType == "mul": # 位置特性を掛け算 W*P*X
+            # pdb.set_trace()
+            pxs = _site * (_img * _mask)
             outputs_img = self._convolution_op(pxs, self.kernel) # 2022/02/28
-            # outputs_img = 0
-            # 複数チャネル＆加重和のための重み
-            # if self.siteInputChan > 1 and self.multiSiteW_Learn:
-            #     multiSiteW_softed = K.softmax(self.multiSiteW)
-                
-            # for c_ind in range(self.siteInputChan):
-            #     pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
-            #     img_out = self._convolution_op(pxi*_mask, self.kernel)
-                
-            #     if self.siteInputChan > 1 and self.multiSiteW_Learn:# 重み和の計算で重みを学習するかどうか
-            #         outputs_img += multiSiteW_softed[c_ind] * img_out
-            #     else: # 平均を取る
-            #         outputs_img += 1/self.siteInputChan * img_out
 
         outputs_mask = self._convolution_op(_mask, self.kernel_mask)
         # Calculate the mask ratio on each pixel in the output mask
@@ -308,15 +266,12 @@ class PKConv(tf.keras.layers.Conv2D):
         return outputs
 
 class PKEncoder(tf.keras.layers.Layer):
-    def __init__(self, filters, kernel_size, siteInputChan=1, opeType="mul",
-        sConvKernelLearn=False, site_range=[0.1,1], learnMultiSiteW=False, siteSigmoid=False,
-        siteClip=False, bn=True):
+    def __init__(self, filters, kernel_size, opeType="mul",
+        site_range=[0.1,1], siteSigmoid=False, siteClip=False, bn=True):
         
         super().__init__()
         
-        self.pkconv = PKConv(filters, kernel_size, siteInputChan=siteInputChan, 
-            opeType=opeType, sConvKernelLearn=sConvKernelLearn, 
-            learnMultiSiteW=learnMultiSiteW, strides=2, padding='same')
+        self.pkconv = PKConv(filters, kernel_size, opeType=opeType, strides=2, padding='same')
         
         self.bn = bn
         self.batchnorm = BatchNormalization(name='EncBN')
@@ -343,12 +298,14 @@ class PKEncoder(tf.keras.layers.Layer):
 #=================================================================
 # siteconv
 class siteConv(tf.keras.layers.Conv2D):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, use_softmax2D=False, **kwargs):
         # pdb.set_trace()
         super(siteConv, self).__init__(*args, **kwargs)
         self.input_spec = [InputSpec(min_ndim=4)]
-        # if nonNegative:
-        #     self.kernel_constraint = NonNeg()
+        self.use_softmax2D = use_softmax2D
+
+        if self.use_softmax2D: # softmax後に各チャネルの平均値を減算
+            self.softmax2D = softmax2D(axis=[1,2], distractMean=True)
 
     # def build(self, input_shape):
     #     # pdb.set_trace()
@@ -389,10 +346,36 @@ class siteConv(tf.keras.layers.Conv2D):
     def call(self, inputs):
         _site = inputs
         outputs_img = self._convolution_op(_site, self.kernel)
-        if self.activation is not None:
+
+        if self.use_softmax2D: # softmax後に平均値を減算
+            outputs_img = self.softmax2D(outputs_img)
+        elif self.activation is not None:
             outputs_img = self.activation(outputs_img)
+        
         return outputs_img
 
+class softmax2D(tf.keras.layers.Layer):
+    def __init__(self, axis=[1,2], distractMean = False):
+        super().__init__()
+        self.axis=axis
+        self.distractMean = distractMean
+    
+    def call(self, img_in):
+        # pdb.set_trace()
+        dim = len(img_in.shape)
+        shape = [img_in.shape[ax] for ax in self.axis]
+        expImg = tf.math.exp(img_in)
+        sumedImg = tf.math.reduce_sum(expImg, axis=self.axis, keepdims=True)
+        # tileShape = [shape[] if dind in self.axis else 1 for dind in range(dim)]
+        sumedImg = tf.tile(sumedImg, [1, shape[0], shape[1], 1])
+        output = expImg/sumedImg
+
+        if self.distractMean:
+            outputMean = tf.math.reduce_mean(output, axis=self.axis, keepdims=True)
+            outputMean = tf.tile(outputMean, [1, shape[0], shape[1], 1])
+            output = output - outputMean
+
+        return output
 
 class siteDeconv(siteConv):
     def __init__(self, *args, **kwargs):
@@ -411,13 +394,3 @@ class siteDeconv(siteConv):
         return outputs_img
 
 #=================================================================
-# multimodal transfer
-class MMCM(tf.keras.layers.Layer):
-    def __init__(self, c):
-        super().__init__()
-    
-
-    def call(self, A, B):
-        pass
-
-

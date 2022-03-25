@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import cv2
 from PIL import Image
 from libs.modelConfig import parse_args,modelBuild
-from libs.models import PConvLearnSite,branchPKConv_lSite,branchPConv_lSite,PKConvLearnSite
+from libs.models import PConvLearnSite,branchPKConv_lSite,branchPConv_lSite,PKConvLearnSite,branchInpaintingModel
 
 if __name__ == "__main__":
     args = parse_args(isTrain=False)
@@ -105,50 +105,18 @@ if __name__ == "__main__":
     else:
         checkpoint_path = f"{experiment_path}{os.sep}logs{ph}{os.sep}cp.ckpt"
         model.load_weights(checkpoint_path)
-    
-    if args.branchLearnSitePConv:
-        model.changeTrainPhase(args.phase) # フェーズ切り替え
 
     # 学習した位置特性で値を持つ点付近の誤差
     #==============================================
     mask = testMask[0,:,:,0]
 
     # pdb.set_trace()
-    if isinstance(model,PConvLearnSite) or isinstance(model,PKConvLearnSite) or isinstance(model,branchPKConv_lSite) and args.phase != 1:
-        model.plotSiteFeature(epoch="-test",plotSitePath=siteConv_path)
+    if isinstance(model,PConvLearnSite) or isinstance(model,PKConvLearnSite) or isinstance(model,branchInpaintingModel) and args.phase != 1:
+        model.plotSiteFeature(epoch="-test",plotSitePath=siteConv_path, existmask=False)
         pickle.dump(model.getSiteFeature(), open(f"{siteConv_path}{os.sep}siteFeature.pickle","wb"))
         if args.siteonly:
             sys.exit()
-    if False:
-        # TODO:後で消す
-        # テスト用(上位10％だけプロットする)
-        originalSiteFeature = model.getSiteFeature()
-        # originalSiteFeature = model.getSiteFeature()[0]
-        # pdb.set_trace()
-        # initValue = model.initValues[0]
-        initValue = model.initValue
-        if args.flatSiteFeature:
-            model.setSiteFeature(initValue)
 
-        origin_s = originalSiteFeature[0,:,:,0]
-        absSite = np.abs(origin_s-initValue[0,:,:,0])
-
-        nonZeroSite = absSite[absSite>0]
-        nonZeroSitePos = np.where(absSite>0)
-
-        ratioFromTop = 0.1
-        highSiteInds = extractFromTop(nonZeroSite,ratioFromTop) # 上位何割かの座標を取得(昇順)
-
-        lowLimitInd = highSiteInds[0] # 上位何割か点のIndex
-        threshValue = nonZeroSite[lowLimitInd] # 上位何割か点の値（境界の値）
-
-        _,site01 = cv2.threshold(absSite,threshValue,1,cv2.THRESH_BINARY) # 境界値より大きい位置特性をマスク化
-        # プロット用位置特性（高い値を持つ点）
-        plotHighSite = initValue + (originalSiteFeature - initValue)*site01[np.newaxis,:,:,np.newaxis]
-        model.setSiteFeature(plotHighSite) # 位置特性の値を上位何割かだけ残した状態にする
-        _ = model.plotSiteFeature(plotSitePath=siteConv_path, saveName=f"top{ratioFromTop}SiteMask")
-        model.setSiteFeature(originalSiteFeature) # 位置特性の値を元に戻す
-    # else:
     site01 = mask
     # pdb.set_trace()
     ksize = 7
@@ -299,9 +267,6 @@ if __name__ == "__main__":
     print(f"obsAround:{np.mean(obsAroundPSNRs)}")
 
     # 保存
-    if args.flatSiteFeature:
-        pickle.dump(summary_data, open(f"{result_path}{os.sep}testSummary_flatSiteFeature.pickle","wb"))
-    else:
-        pickle.dump(summary_data, open(f"{result_path}{os.sep}testSummary.pickle","wb"))
+    pickle.dump(summary_data, open(f"{result_path}{os.sep}testSummary.pickle","wb"))
 
   

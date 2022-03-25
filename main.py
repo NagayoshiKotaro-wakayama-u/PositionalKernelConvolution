@@ -7,6 +7,7 @@ import pdb
 import copy
 from libs.util import loadSiteImage,plotDatas
 from argparse import ArgumentParser
+from libs.models import branchInpaintingModel,PKConvLearnSite,PConvLearnSite
 from libs.modelConfig import parse_args,modelBuild
 from tensorflow.compat.v1 import ConfigProto
 from tensorflow.compat.v1 import InteractiveSession
@@ -258,18 +259,19 @@ if __name__ == "__main__":
         model.changeTrainPhase(0) # 初めは両方のモデルを同時に学習（phase = 0に設定）
 
     
-    # if args.branchLearnSitePConv:
-    #     model.changeTrainPhase(args.phase) # フェーズ切り替え
-    #     # 1つ前のフェーズ
-    #     current_ph = ""
-    #     if args.phase - 1 > 1: # 2以降は番号を付ける
-    #         current_ph = f"{args.phase - 1}"
+    if isinstance(model, branchInpaintingModel) or isinstance(model ,PKConvLearnSite) or isinstance(model, PConvLearnSite):
+        model.changeTrainPhase(args.phase) # フェーズ切り替え
+        # 1つ前のフェーズ
+        current_ph = ""
+        if args.phase - 1 > 1: # 2以降は番号を付ける
+            current_ph = f"{args.phase - 1}"
 
-    #     if args.pretrainModel != "":
-    #         # 1つ前のフェーズのパラメータをロード
-    #         expath = f".{os.sep}experiment{os.sep}{args.pretrainModel}_logs"
-    #         load_checkpoint_path = f"{expath}{os.sep}logs{current_ph}{os.sep}cp.ckpt"
-    #         model.load_weights(load_checkpoint_path)
+        if args.pretrainModel != "":
+            # 1つ前のフェーズのパラメータをロード
+            # pdb.set_trace()
+            expath = f".{os.sep}experiment{os.sep}{args.pretrainModel}_logs"
+            load_checkpoint_path = f"{expath}{os.sep}logs{current_ph}{os.sep}cp.ckpt"
+            model.load_weights(load_checkpoint_path)
 
     # =======================
     # 学習

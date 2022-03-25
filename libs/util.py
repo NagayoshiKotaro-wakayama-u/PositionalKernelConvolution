@@ -229,14 +229,15 @@ def clip(x,sta=-0.1,end=0.1): # Clip the value
 
 class resultInpaint():
     # imgs:真値　mask:マスク画像　exist:予測領域画像　experiment_path:予測結果のpickleが入っているディレクトリ
-    def __init__(self, imgs, mask, exist, experiment_path, regions={}) -> None:
+    def __init__(self, imgs, mask, exist, experiment_path, phase=0, regions={}) -> None:
         # maskとexistは0～1
         assert (np.max(mask) == 1 and np.min(mask) == 0) and (np.max(exist) == 1 and np.min(exist) == 0)
                 
         #===============
         # path関連
         self.experimentPath = experiment_path
-        self.resultPath = f"{self.experimentPath}{os.sep}result"
+        ph = phase if phase > 1 else ""
+        self.resultPath = f"{self.experimentPath}{os.sep}result{ph}"
         self.compPath = f"{self.resultPath}{os.sep}comparison"
         self.regionPath = f"{self.resultPath}{os.sep}region"
         for DIR in [self.resultPath, self.compPath, self.regionPath]:
