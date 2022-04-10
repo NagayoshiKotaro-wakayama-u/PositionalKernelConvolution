@@ -1,10 +1,3 @@
-# **実行環境について**
-
-すべてのコードは以下に存在します
-~~~
-nagayoshi@deep2:~/research/PositionalKernelConvolution$
-~~~
-
 # <font color="Yellow">**学習**</font>
 ## 概要
 ~~~
