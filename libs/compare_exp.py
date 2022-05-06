@@ -83,12 +83,18 @@ if __name__ == "__main__":
             if args.phase > 1: # フェーズが1以上でディレクトリ名が変わる
                 ph = args.phase
 
+            all_cv_preds = []
+            all_cv_imgs = []
+            all_cv_PSNRs = []
+            
             for i in range(args.crossVaridation):
                 experiment_path = f"experiment{os.sep}{exp}_cv{i}_logs"
                 result_path = f"{experiment_path}{os.sep}result{ph}"
                 summary_path = f"{result_path}{os.sep}testSummary.pickle"
 
                 summaryData = pickle.load(open(summary_path,"rb"))
+                all_cv_preds.append(summaryData["preds"])
+                all_cv_PSNRs.append(summaryData["PSNRs"])
 
                 # データのロード
                 exist = np.array(Image.open(existPath))/255 if existPath!="" else np.ones(testImg.shape[1:3])
@@ -109,6 +115,7 @@ if __name__ == "__main__":
                     testMask = pickle.load(open(TEST_MASK_PICKLE,"rb"))
                     testMasked = np.squeeze(testImg*testMask)
                     mask = testMask[0,:,:,0]
+                    all_cv_imgs.append(np.squeeze(testImg))
 
                     # テスト結果の読み込み
                     # psnr = summaryData["PSNR"]
@@ -120,7 +127,7 @@ if __name__ == "__main__":
                     # 各cross validation全体のPSNRを計算
                     psnr = resultPlot.allPSNR()
                     
-                    PSNRs.append(psnr)
+                    PSNRs.append(psnr) # each fold, all pixel
                     avePSNR += psnr
                     regdic = resultPlot.allRegionPSNR()
                     osakaPSNR.append(regdic["osaka"])
@@ -138,7 +145,27 @@ if __name__ == "__main__":
 
                         obsAroundPSNRList[eind][1].append(obsAroundPSNR_flatSite)
                     
+            #pdb.set_trace()
+            all_cv_preds = np.concatenate(all_cv_preds) # shape [150, 512, 512]
+            all_cv_imgs = np.concatenate(all_cv_imgs) # shape [150, 512, 512]
+            
+            # calc ALL cross validation PSNR
+            all_resultPlot = resultInpaint(all_cv_imgs, mask, exist, experiment_path, phase=args.phase, regions=regions, preds=all_cv_preds)
+            all_pixel_regdic = resultPlot.allRegionPSNR()
+            all_pixel_osakaPSNR = all_pixel_regdic["osaka"]
+            all_pixel_tokyoPSNR = all_pixel_regdic["tokyo"]
+            all_pixel_nagoyaPSNR = all_pixel_regdic["nagoya"]
+            all_cv_pixel_PSNR = PSNR(all_cv_preds, all_cv_imgs, exist=np.tile(exist[np.newaxis],[all_cv_imgs.shape[0],1,1]))
+            
+            # over image average PSNR
+            over_img_avePSNR = np.mean(np.concatenate(all_cv_PSNRs))
+            regOverimage_resultPlot = resultInpaint(all_cv_imgs, mask, exist, experiment_path, phase=args.phase, regions=regions, preds=all_cv_preds, isRegionOver_image=True)
+            overimage_regdic = regOverimage_resultPlot.allRegionPSNR()
+            overimage_osakaPSNR = overimage_regdic["osaka"]
+            overimage_tokyoPSNR = overimage_regdic["tokyo"]
+            overimage_nagoyaPSNR = overimage_regdic["nagoya"]
 
+            
             if args.siteComp:# 交差検証各回の位置特性を平均する
                 site_aves[eind] = site_aves[eind]/args.crossVaridation
             else:
@@ -149,7 +176,10 @@ if __name__ == "__main__":
                 # pdb.set_trace()
                 AveObsAroundPSNR = np.mean(obsAroundPSNRList[eind][0])
                 # print(f"{exp}:avePSNR={avePSNR}, PSNRs={PSNRs}")
-                txtfile.write(f"{exp}:\navePSNR={avePSNR}\n osaka :{aveOsakaPSNR}\n tokyo :{aveTokyoPSNR}\n nagoya:{aveNagoyaPSNR}\nobAround:{AveObsAroundPSNR}\nPSNRs={PSNRs}\n\n")
+                #txtfile.write(f"{exp}:\navePSNR={avePSNR}\n osaka :{aveOsakaPSNR}\n tokyo :{aveTokyoPSNR}\n nagoya:{aveNagoyaPSNR}\nobAround:{AveObsAroundPSNR}\nPSNRs={PSNRs}\n\n")
+                txtfile.write(f"{exp}:\navePSNR(over fold)={avePSNR}\n osaka(over fold) :{aveOsakaPSNR}\n tokyo(over fold) :{aveTokyoPSNR}\n nagoya(over fold):{aveNagoyaPSNR}\nobAround:{AveObsAroundPSNR}\nPSNRs={PSNRs}\n")
+                txtfile.write(f"PSNR(all pixel)={all_cv_pixel_PSNR}\n osaka(all pixel) :{all_pixel_osakaPSNR}\n tokyo(all pixel) :{all_pixel_tokyoPSNR}\n nagoya(all pixel):{all_pixel_nagoyaPSNR}\n")
+                txtfile.write(f"avePSNR(over image)={over_img_avePSNR}\n osaka(over image) :{overimage_osakaPSNR}\n tokyo(over image) :{overimage_tokyoPSNR}\n nagoya(over image):{overimage_nagoyaPSNR}\n\n")
 
                 PSNRsList.append(PSNRs)
 
