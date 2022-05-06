@@ -229,7 +229,7 @@ def clip(x,sta=-0.1,end=0.1): # Clip the value
 
 class resultInpaint():
     # imgs:真値　mask:マスク画像　exist:予測領域画像　experiment_path:予測結果のpickleが入っているディレクトリ
-    def __init__(self, imgs, mask, exist, experiment_path, phase=0, regions={}) -> None:
+    def __init__(self, imgs, mask, exist, experiment_path, phase=0, regions={}, preds=[], isRegionOver_image=False) -> None:
         # maskとexistは0～1
         assert (np.max(mask) == 1 and np.min(mask) == 0) and (np.max(exist) == 1 and np.min(exist) == 0)
                 
@@ -248,8 +248,11 @@ class resultInpaint():
         self.imgs = np.squeeze(imgs)
         self.mask = np.squeeze(mask)
         # pdb.set_trace()
-        self.preds = pickle.load(open(f"{self.resultPath}{os.sep}testSummary.pickle","rb"))["preds"]
-        self.preds = np.squeeze(np.array(self.preds))
+        if len(preds)==0:
+            self.preds = pickle.load(open(f"{self.resultPath}{os.sep}testSummary.pickle","rb"))["preds"]
+            self.preds = np.squeeze(np.array(self.preds))
+        else:
+            self.preds = preds
         self.exist = exist
 
         self.shape = self.imgs.shape[1:]
@@ -264,6 +267,7 @@ class resultInpaint():
         for key in regions.keys():
             self.addRegion(key,regions[key]) # 座標の大小関係をチェックしながら追加
         self.regPSNRs = {}
+        self.regOverImage = isRegionOver_image
         #===============
 
     def plot3x3Analyse(self,mask,pred,img,exist,savepath="comparison.png"):# 3x3プロットを保存
@@ -343,8 +347,15 @@ class resultInpaint():
     
     def regionPSNR(self,regionName):# ある領域のPSNRを全データで平均して返す
         imgs,_,preds,exist = self.cropRegion(regionName)
+        
+        if self.regOverImage:
+            psnr = 0
+            for i in range(len(imgs)):
+                psnr+=PSNR(preds[i], imgs[i], exist=exist)
+            psnr = psnr/len(imgs)
+        else:
+            psnr = PSNR(preds, imgs, exist=np.tile(exist[np.newaxis],[self.imgs.shape[0],1,1]))
         # psnr = PSNR(preds, imgs)
-        psnr = PSNR(preds, imgs, exist=np.tile(exist[np.newaxis],[self.imgs.shape[0],1,1]))
         # psnr = self.PSNR(preds, imgs, exist)
         # self.regPSNRs.update({regionName:psnr})
         return psnr
